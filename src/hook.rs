@@ -483,6 +483,24 @@ fn handle(store: &Store, agent_arg: &str, event_arg: &str, raw: &[u8]) -> Result
         (String::new(), String::new())
     };
 
+    // Где идёт сессия. Codex 0.169 исполняет хуки своим фоновым процессом, а у того
+    // окружение панели, из которой он однажды запустился; поэтому место сессии Codex
+    // ищется по процессу его интерфейса — на границах хода и пока оно неизвестно.
+    let place = if agent == "codex" && detect::under_codex_daemon() {
+        let stored = before
+            .as_ref()
+            .map(|session| session.place.clone())
+            .filter(|known| !known.is_empty() && known != "?");
+        match stored {
+            Some(known) if !boundary => known,
+            stored => {
+                detect::codex_place(&cwd, stored.as_deref()).unwrap_or_else(|| "?".to_string())
+            }
+        }
+    } else {
+        detect::place()
+    };
+
     // Название от агента ищем до блокировки: опрос zellij небыстрый. События инструментов
     // самые частые, поэтому на них ищем, только пока название ещё не найдено и не задано вручную.
     let dir = detect::base_name(&cwd);
@@ -493,10 +511,10 @@ fn handle(store: &Store, agent_arg: &str, event_arg: &str, raw: &[u8]) -> Result
         if known {
             None
         } else {
-            detect::agent_title(&agent, &sid, &transcript, false, &dir, &settings)
+            detect::agent_title(&agent, &sid, &transcript, false, &dir, &place, &settings)
         }
     } else {
-        detect::agent_title(&agent, &sid, &transcript, true, &dir, &settings)
+        detect::agent_title(&agent, &sid, &transcript, true, &dir, &place, &settings)
     };
 
     let ctx = Context {
@@ -508,7 +526,7 @@ fn handle(store: &Store, agent_arg: &str, event_arg: &str, raw: &[u8]) -> Result
         task,
         branch,
         fresh,
-        place: detect::place(),
+        place,
         now: config::now(),
         notify_min_sec: settings.int("DISP_NOTIFY_MIN_SEC", 120),
         auto_ok_on_exit: settings.get("DISP_AUTO_OK_ON_EXIT") == Some("1"),

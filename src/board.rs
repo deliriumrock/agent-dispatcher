@@ -99,7 +99,7 @@ impl Row {
             what.push_str(&fallback.unwrap_or_default());
         }
         if s.accepted {
-            format!("[принято] {what}")
+            format!("[убрано] {what}")
         } else {
             what
         }
@@ -116,7 +116,7 @@ impl Row {
         )
     }
 
-    /// Идёт ли в сессии работа: такую нельзя принять без явного подтверждения.
+    /// Идёт ли в сессии работа: такую нельзя убрать из списка без явного подтверждения.
     pub fn is_active(&self) -> bool {
         let s = &self.session;
         matches!(s.status, Status::Working | Status::Waiting) && !s.ended
@@ -172,7 +172,7 @@ pub fn details(row: &Row, now: i64) -> Vec<Detail> {
         }
     }
     if s.accepted {
-        status.push_str(" · принято");
+        status.push_str(" · убрано из списка");
     }
     field("статус", status, Tone::Status);
     field("что", s.title.clone(), Tone::Plain);
@@ -341,7 +341,7 @@ fn place_key(row: &Row) -> (u8, String, u64, String) {
 pub struct Counts {
     /// Требуют человека: ждут, сбой, прерваны.
     pub attention: usize,
-    /// Закончены и не приняты.
+    /// Закончены, но ещё не убраны из списка.
     pub done: usize,
     /// Работают.
     pub working: usize,
@@ -365,7 +365,7 @@ impl Counts {
     /// Сводка одной строкой.
     pub fn line(&self) -> String {
         format!(
-            "ждут тебя: {} · не принято: {} · работают: {} · тихо: {}",
+            "ждут тебя: {} · готово: {} · работают: {} · тихо: {}",
             self.attention, self.done, self.working, self.quiet
         )
     }
@@ -424,7 +424,7 @@ impl Board {
 
     /// Строки доски, отсортированные по статусу: сверху то, что требует человека,
     /// затем работающие, в конце готовые; внутри группы — самое давнее.
-    /// Без `all` скрыты принятые сессии и давно простаивающие.
+    /// Без `all` скрыты убранные сессии и давно простаивающие.
     pub fn visible(&self, all: bool) -> Vec<Row> {
         let mut rows = self.rows();
         if !all {
@@ -443,7 +443,7 @@ impl Board {
 /// Чем закончилась попытка принять результат.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Accepted {
-    /// Результат принят и записан.
+    /// Сессия убрана из списка, запись сохранена.
     Yes,
     /// Сессия ещё работает или ждёт человека; без `force` она не принимается.
     StillActive,
@@ -767,7 +767,7 @@ mod tests {
         );
         assert_eq!(
             counts.line(),
-            "ждут тебя: 3 · не принято: 1 · работают: 1 · тихо: 0"
+            "ждут тебя: 3 · готово: 1 · работают: 1 · тихо: 0"
         );
     }
 }

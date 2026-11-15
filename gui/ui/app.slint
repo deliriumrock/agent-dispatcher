@@ -405,7 +405,7 @@ export component AppWindow inherits Window {
                         }
 
                         Badge {
-                            label: "не принято";
+                            label: "готово";
                             count: root.unaccepted;
                             accent: Theme.done;
                         }
@@ -507,7 +507,7 @@ export component AppWindow inherits Window {
             if root.rows.length == 0: Text {
                 x: 14px;
                 y: 12px;
-                text: root.show-all ? "Сессий нет." : "Незакрытых сессий нет.  Tab покажет и принятые.";
+                text: root.show-all ? "Сессий нет." : "Незакрытых сессий нет.  Tab покажет и убранные.";
                 color: Theme.muted;
             }
         }
@@ -543,7 +543,8 @@ export component AppWindow inherits Window {
                     }
 
                     for action in [
-                        { name: "accept", label: "Принять" },
+                        { name: "approve", label: "Принять" },
+                        { name: "remove", label: "Убрать" },
                         { name: "focus", label: "Перейти" },
                         { name: "rename", label: "Назвать" },
                     ]: Rectangle {

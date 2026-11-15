@@ -191,12 +191,22 @@ fn execute(command: Command, app: &mut App, paths: &Paths) {
                 None => {}
             }
         }
+        Command::Approve => {
+            // Нажатие уходит в панель агента: решаем по только что перечитанной записи.
+            let Some((_board, _lock, row)) = fresh(app) else {
+                return;
+            };
+            match panes::approve(&row.session) {
+                Ok(text) => app.notify(text, false),
+                Err(text) => app.notify(text, true),
+            }
+        }
         Command::Accept { force } => {
             let Some((board, _lock, mut row)) = fresh(app) else {
                 return;
             };
             match board::accept(&mut row, board.now, force) {
-                Ok(Accepted::Yes) => app.notify(format!("принято: {}", row.summary()), false),
+                Ok(Accepted::Yes) => app.notify(format!("убрано: {}", row.summary()), false),
                 // Пока мы смотрели на экран, сессия снова заработала: спрашиваем.
                 Ok(Accepted::StillActive) => app.mode = Mode::Confirm,
                 Err(err) => app.notify(format!("не записано: {err}"), true),

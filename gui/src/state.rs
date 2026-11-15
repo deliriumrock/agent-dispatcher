@@ -65,7 +65,7 @@ pub struct ViewData {
     pub details: ModelRc<DetailField>,
     /// Подсказки по клавишам.
     pub hints: ModelRc<Hint>,
-    /// Счётчики: ждут человека, не принято, работают, тихо.
+    /// Счётчики: ждут человека, готово, работают, тихо.
     pub counts: [i32; 4],
     /// Время.
     pub clock: SharedString,
@@ -227,7 +227,7 @@ impl State {
             if matches!(key, Pressed::Char('y' | 'Y' | 'н' | 'Н' | 'д' | 'Д')) {
                 self.accept(true);
             } else {
-                self.notify("не принято", false);
+                self.notify("не убрано", false);
             }
             return Outcome::None;
         }
@@ -247,7 +247,8 @@ impl State {
             Pressed::Enter | Pressed::Char('d') => {
                 self.details = !self.details;
             }
-            Pressed::Char('a' | ' ') => return self.command("accept"),
+            Pressed::Char('a') => return self.command("approve"),
+            Pressed::Char('x') => return self.command("remove"),
             Pressed::Char('u') => {
                 if self.selected_row().is_some_and(|row| row.session.accepted) {
                     self.unaccept();
@@ -276,17 +277,23 @@ impl State {
         Outcome::Reveal
     }
 
-    /// Выполняет команду над выбранной строкой: `accept`, `focus` или `rename`.
+    /// Выполняет команду над выбранной строкой: `approve` (принять — ответить агенту «да»),
+    /// `remove` (убрать из списка), `focus` (перейти) или `rename` (назвать).
     /// Так же называются кнопки в подробностях.
     pub fn command(&mut self, name: &str) -> Outcome {
         let Some(row) = self.selected_row() else {
             return Outcome::None;
         };
         match name {
-            // Принятую строку клавиша приёмки возвращает, про работающую сначала спрашивает.
-            "accept" if row.session.accepted => self.unaccept(),
-            "accept" if row.is_active() => self.confirm = true,
-            "accept" => self.accept(false),
+            // Enter уходит в панель агента: решаем по только что перечитанной записи.
+            "approve" if row.view != View::Wait => {
+                self.notify("агент сейчас ничего не спрашивает", true);
+            }
+            "approve" => self.approve(),
+            // Убранную строку клавиша возвращает, про работающую сначала спрашивает.
+            "remove" if row.session.accepted => self.unaccept(),
+            "remove" if row.is_active() => self.confirm = true,
+            "remove" => self.accept(false),
             "focus" => match panes::focus(&row.session) {
                 Ok(text) => self.notify(text, false),
                 Err(text) => self.notify(text, true),
@@ -328,10 +335,23 @@ impl State {
             return;
         };
         match board::accept(&mut row, board.now, force) {
-            Ok(Accepted::Yes) => self.notify(format!("принято: {}", row.summary()), false),
+            Ok(Accepted::Yes) => self.notify(format!("убрано: {}", row.summary()), false),
             // Пока мы смотрели на экран, сессия снова заработала: спрашиваем.
             Ok(Accepted::StillActive) => self.confirm = true,
             Err(err) => self.notify(format!("не записано: {err}"), true),
+        }
+        drop(lock);
+        self.reload();
+    }
+
+    /// Отвечает агенту выбранной сессии вариантом по умолчанию.
+    fn approve(&mut self) {
+        let Some((_board, lock, row)) = self.fresh() else {
+            return;
+        };
+        match panes::approve(&row.session) {
+            Ok(text) => self.notify(text, false),
+            Err(text) => self.notify(text, true),
         }
         drop(lock);
         self.reload();
@@ -405,7 +425,7 @@ impl State {
         };
         let question = match selected {
             Some(row) if self.confirm => format!(
-                "{} ещё {}. Принять всё равно?  y — да, любая другая клавиша — нет",
+                "{} ещё {}. Убрать из списка всё равно?  y — да, любая другая клавиша — нет",
                 row.sid,
                 if row.view == View::Wait {
                     "ждёт тебя"
@@ -562,7 +582,11 @@ fn hints(width: f32) -> Vec<Hint> {
     };
     let lanes = width >= LANE_FROM_WIDTH;
     let mut out = vec![hint("↑↓", "выбор"), hint("Enter", "подробности")];
-    out.extend([hint("a", "принять"), hint("g", "перейти")]);
+    out.extend([
+        hint("a", "принять"),
+        hint("x", "убрать"),
+        hint("g", "перейти"),
+    ]);
     if width >= 760.0 {
         out.extend([hint("n", "назвать"), hint("s", "сортировка")]);
     }
@@ -651,14 +675,14 @@ mod tests {
     }
 
     #[test]
-    fn active_session_is_asked_about_before_accepting() {
+    fn active_session_is_asked_about_before_removing() {
         let mut state = state();
-        assert_eq!(state.key(Pressed::Char('a')), Outcome::None);
+        assert_eq!(state.key(Pressed::Char('x')), Outcome::None);
         assert!(state.confirm);
         let view = state.view(960.0);
         assert_eq!(
             view.question.as_str(),
-            "0000wait ещё ждёт тебя. Принять всё равно?  y — да, любая другая клавиша — нет"
+            "0000wait ещё ждёт тебя. Убрать из списка всё равно?  y — да, любая другая клавиша — нет"
                 .replace("0000wait", &state.rows[0].sid)
         );
         // Любая другая клавиша — отказ.
@@ -666,13 +690,28 @@ mod tests {
         assert!(!state.confirm);
         assert_eq!(
             state.notice.as_ref().map(|notice| notice.text.as_str()),
-            Some("не принято")
+            Some("не убрано")
         );
         assert_eq!(state.key(Pressed::Char('n')), Outcome::StartRename);
         assert!(state.renaming);
         // Пустое название — отмена ввода, файлы не трогаются.
         state.rename("   ");
         assert!(!state.renaming);
+    }
+
+    #[test]
+    fn answer_is_only_for_a_waiting_agent() {
+        let mut state = state();
+        // Вторая строка работает: отвечать нечего, нажатие не уходит.
+        state.key(Pressed::Down);
+        assert_eq!(state.key(Pressed::Char('a')), Outcome::None);
+        assert_eq!(
+            state.notice.as_ref().map(|notice| notice.text.as_str()),
+            Some("агент сейчас ничего не спрашивает")
+        );
+        // Пробел больше ничего не делает.
+        assert_eq!(state.key(Pressed::Char(' ')), Outcome::None);
+        assert!(!state.confirm);
     }
 
     #[test]
@@ -688,7 +727,7 @@ mod tests {
         assert_eq!(rows[0].place.as_str(), "dev#3");
         assert_eq!(rows[0].age.as_str(), "1м");
         assert_eq!(rows[1].age.as_str(), "<1м");
-        assert_eq!(rows[2].headline.as_str(), "[принято] Задача done");
+        assert_eq!(rows[2].headline.as_str(), "[убрано] Задача done");
         assert!(rows[2].accepted);
         // Принятая строка в счётчики не входит.
         assert_eq!(view.counts, [1, 0, 1, 0]);
@@ -764,8 +803,8 @@ mod tests {
                 .map(|hint| hint.key.to_string())
                 .collect()
         };
-        assert_eq!(keys(480.0), ["a", "g", "q"]);
-        assert_eq!(keys(640.0), ["↑↓", "Enter", "a", "g", "q"]);
+        assert_eq!(keys(480.0), ["a", "x", "g", "q"]);
+        assert_eq!(keys(640.0), ["↑↓", "Enter", "a", "x", "g", "q"]);
         assert!(keys(1100.0).contains(&"Tab".to_string()));
     }
 }

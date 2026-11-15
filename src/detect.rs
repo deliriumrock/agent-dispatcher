@@ -62,7 +62,11 @@ const PROJECT_MARKERS: [&str; 11] = [
 
 /// Где идёт сессия: `zellij:сессия#панель`, `tmux:панель`, `vscode`, имя терминала.
 pub fn place() -> String {
-    let var = |key: &str| env_nonempty(key);
+    place_from(&|key: &str| env_nonempty(key))
+}
+
+/// Место по переменным окружения, которые отдаёт `var`.
+fn place_from(var: &dyn Fn(&str) -> Option<String>) -> String {
     if var("ZELLIJ").is_some() || var("ZELLIJ_SESSION_NAME").is_some() {
         let session = var("ZELLIJ_SESSION_NAME").unwrap_or_else(|| "?".to_string());
         let pane = var("ZELLIJ_PANE_ID").unwrap_or_else(|| "?".to_string());
@@ -154,6 +158,112 @@ fn transcript_first_cwd(path: &Path) -> Option<String> {
                 .filter(|dir| !dir.is_empty())
                 .map(str::to_string)
         })
+}
+
+/// Запущен ли хук фоновым процессом Codex (`codex app-server`), а не самим агентом.
+///
+/// Codex 0.169 исполняет хуки в этом процессе, а он один на все сессии и запущен когда-то
+/// из какой-то одной панели. Переменные окружения хука — его, и по ним нельзя судить,
+/// где идёт сессия: все сессии Codex оказались бы в той первой панели.
+pub fn under_codex_daemon() -> bool {
+    under_codex_daemon_in(Path::new("/proc"), std::process::id())
+}
+
+fn under_codex_daemon_in(proc: &Path, pid: u32) -> bool {
+    let mut pid = pid;
+    // Хук запускается через оболочку, поэтому смотрим несколько предков.
+    for _ in 0..6 {
+        let Some(parent) = parent_pid(proc, pid).filter(|parent| *parent > 1) else {
+            return false;
+        };
+        let args = cmdline(proc, parent);
+        if is_codex(&args) && args.iter().any(|arg| arg == "app-server") {
+            return true;
+        }
+        pid = parent;
+    }
+    false
+}
+
+/// Где идёт сессия Codex с рабочим каталогом `cwd`, если хук запущен его фоновым
+/// процессом: место берётся из окружения процесса интерфейса Codex с тем же текущим
+/// каталогом. Если такие процессы есть в разных местах, выбирается `prefer`, когда оно
+/// среди них, а иначе место не определено: гадать нельзя, по месту нажимается Enter.
+pub fn codex_place(cwd: &str, prefer: Option<&str>) -> Option<String> {
+    codex_place_in(Path::new("/proc"), cwd, prefer)
+}
+
+fn codex_place_in(proc: &Path, cwd: &str, prefer: Option<&str>) -> Option<String> {
+    let mut found: Vec<String> = Vec::new();
+    for entry in fs::read_dir(proc).ok()?.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let args = cmdline(proc, pid);
+        if !is_codex(&args) || args.iter().any(|arg| arg == "app-server") {
+            continue;
+        }
+        let dir = proc.join(pid.to_string());
+        if fs::read_link(dir.join("cwd")).ok().as_deref() != Some(Path::new(cwd)) {
+            continue;
+        }
+        let Ok(environ) = fs::read(dir.join("environ")) else {
+            continue;
+        };
+        let vars: Vec<(String, String)> = environ
+            .split(|byte| *byte == 0)
+            .filter_map(|item| {
+                let text = String::from_utf8_lossy(item);
+                let (key, value) = text.split_once('=')?;
+                Some((key.to_string(), value.to_string()))
+            })
+            .collect();
+        let var = |key: &str| {
+            vars.iter()
+                .find(|(name, value)| name == key && !value.is_empty())
+                .map(|(_, value)| value.clone())
+        };
+        let place = place_from(&var);
+        if !found.contains(&place) {
+            found.push(place);
+        }
+    }
+    match found.as_slice() {
+        [one] => Some(one.clone()),
+        many => prefer
+            .filter(|wanted| many.iter().any(|place| place == wanted))
+            .map(str::to_string),
+    }
+}
+
+/// Родитель процесса по `/proc/<pid>/stat`.
+fn parent_pid(proc: &Path, pid: u32) -> Option<u32> {
+    let stat = fs::read_to_string(proc.join(pid.to_string()).join("stat")).ok()?;
+    // Имя процесса в скобках может содержать пробелы: поля считаем после последней «)».
+    let rest = &stat[stat.rfind(')')? + 1..];
+    rest.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Аргументы командной строки процесса.
+fn cmdline(proc: &Path, pid: u32) -> Vec<String> {
+    fs::read(proc.join(pid.to_string()).join("cmdline"))
+        .map(|bytes| {
+            bytes
+                .split(|byte| *byte == 0)
+                .filter(|part| !part.is_empty())
+                .map(|part| String::from_utf8_lossy(part).into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Процесс Codex: сама программа или её обёртка на node (`node …/bin/codex`).
+fn is_codex(args: &[String]) -> bool {
+    args.iter().take(2).any(|arg| base_name(arg) == "codex")
 }
 
 /// Имя задачи и ветка для рабочего каталога: имя каталога git-репозитория (или worktree),
@@ -332,6 +442,7 @@ pub fn agent_title(
     transcript: &str,
     full: bool,
     dir: &str,
+    place: &str,
     settings: &Settings,
 ) -> Option<String> {
     if agent == "claude" {
@@ -348,8 +459,8 @@ pub fn agent_title(
     if !full || settings.get("DISP_PANE_TITLE") == Some("0") {
         return None;
     }
-    let pane = env_nonempty("ZELLIJ_PANE_ID")?;
-    let raw = pane_title(&pane)?;
+    let (zellij, pane) = crate::panes::target(place)?;
+    let raw = pane_title(zellij, pane)?;
     clean_pane_title(&raw, agent, dir)
 }
 
@@ -439,9 +550,15 @@ fn scan_titles(data: &[u8]) -> Option<String> {
     custom.or(ai).filter(|title| !title.is_empty())
 }
 
-/// Заголовок панели zellij с номером `pane` из вывода `zellij action list-panes`.
-fn pane_title(pane: &str) -> Option<String> {
-    let listing = run_with_timeout(Command::new("zellij").args(["action", "list-panes"]))?;
+/// Заголовок панели zellij с номером `pane` в сессии `zellij` из вывода
+/// `zellij action list-panes`.
+fn pane_title(zellij: &str, pane: &str) -> Option<String> {
+    let listing = run_with_timeout(Command::new("zellij").args([
+        "--session",
+        zellij,
+        "action",
+        "list-panes",
+    ]))?;
     let wanted = format!("terminal_{pane}");
     listing.lines().find_map(|line| {
         let (id, rest) = line.trim_start().split_once(char::is_whitespace)?;
@@ -675,6 +792,108 @@ mod tests {
         assert_eq!(find(Path::new("/tmp/scratch/x.rs"), None), None);
         assert_eq!(find(&root.join("../elsewhere/x.rs"), None), None);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Поддельный `/proc`: процессы с родителем, командной строкой, каталогом и окружением.
+    struct FakeProc {
+        root: PathBuf,
+    }
+
+    impl FakeProc {
+        fn new(name: &str) -> Self {
+            let root =
+                std::env::temp_dir().join(format!("disp-proc-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            FakeProc { root }
+        }
+
+        fn add(&self, pid: u32, parent: u32, args: &[&str], cwd: &str, env: &[&str]) {
+            let dir = self.root.join(pid.to_string());
+            assert!(fs::create_dir_all(&dir).is_ok());
+            let stat = format!("{pid} (proc name) S {parent} 1 1 0");
+            assert!(fs::write(dir.join("stat"), stat).is_ok());
+            assert!(fs::write(dir.join("cmdline"), args.join("\0") + "\0").is_ok());
+            assert!(fs::write(dir.join("environ"), env.join("\0") + "\0").is_ok());
+            assert!(std::os::unix::fs::symlink(cwd, dir.join("cwd")).is_ok());
+        }
+    }
+
+    impl Drop for FakeProc {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn hook_under_the_codex_daemon_is_recognised() {
+        let proc = FakeProc::new("daemon");
+        let daemon = "/home/u/.codex/packages/app-server-daemon/bin/codex";
+        proc.add(
+            100,
+            1,
+            &[daemon, "app-server", "--listen", "unix"],
+            "/w",
+            &[],
+        );
+        proc.add(200, 100, &["sh", "-c", "disp hook codex"], "/w", &[]);
+        proc.add(300, 200, &["disp", "hook", "codex"], "/w", &[]);
+        // Хук Claude Code: родитель — сам агент.
+        proc.add(400, 1, &["claude"], "/w", &[]);
+        proc.add(500, 400, &["disp", "hook", "claude"], "/w", &[]);
+        assert!(under_codex_daemon_in(&proc.root, 300));
+        assert!(!under_codex_daemon_in(&proc.root, 500));
+    }
+
+    #[test]
+    fn codex_place_comes_from_its_interface_process() {
+        let proc = FakeProc::new("place");
+        let tui = "/home/u/node_modules/@openai/codex-linux-x64/vendor/bin/codex";
+        let dev3 = ["ZELLIJ=0", "ZELLIJ_SESSION_NAME=dev", "ZELLIJ_PANE_ID=3"];
+        // Фоновый процесс с окружением первой панели не в счёт.
+        proc.add(10, 1, &[tui, "app-server"], "/w/site", &dev3);
+        proc.add(
+            20,
+            1,
+            &["node", "/home/u/.npm-global/bin/codex"],
+            "/w/site",
+            &["ZELLIJ=0", "ZELLIJ_SESSION_NAME=dev", "ZELLIJ_PANE_ID=7"],
+        );
+        proc.add(
+            21,
+            20,
+            &[tui],
+            "/w/site",
+            &["ZELLIJ=0", "ZELLIJ_SESSION_NAME=dev", "ZELLIJ_PANE_ID=7"],
+        );
+        proc.add(30, 1, &[tui, "resume"], "/w/other", &dev3);
+        proc.add(
+            40,
+            1,
+            &["systemd-inhibit", "--who", "codex"],
+            "/w/site",
+            &[],
+        );
+        assert_eq!(
+            codex_place_in(&proc.root, "/w/site", None).as_deref(),
+            Some("zellij:dev#7")
+        );
+        assert_eq!(
+            codex_place_in(&proc.root, "/w/other", None).as_deref(),
+            Some("zellij:dev#3")
+        );
+        assert_eq!(codex_place_in(&proc.root, "/w/none", None), None);
+
+        // Два интерфейса Codex в одном каталоге: гадать нельзя, кроме уже известного места.
+        proc.add(50, 1, &[tui], "/w/other", &["TERM_PROGRAM=vscode"]);
+        assert_eq!(codex_place_in(&proc.root, "/w/other", None), None);
+        assert_eq!(
+            codex_place_in(&proc.root, "/w/other", Some("vscode")).as_deref(),
+            Some("vscode")
+        );
+        assert_eq!(
+            codex_place_in(&proc.root, "/w/other", Some("zellij:dev#9")),
+            None
+        );
     }
 
     #[test]

@@ -239,3 +239,44 @@ fn label_and_unlabel_commands() {
         ]
     );
 }
+
+#[test]
+fn yes_presses_enter_only_for_a_waiting_agent() {
+    let sandbox = Sandbox::new("yes");
+    let prompt = r#"{"session_id":"s-9","cwd":"/tmp","hook_event_name":"UserPromptSubmit","prompt":"Собери"}"#;
+    let ask = r#"{"session_id":"s-9","cwd":"/tmp","hook_event_name":"PermissionRequest","tool_name":"Bash"}"#;
+    sandbox.event("claude", prompt, false);
+
+    // Агент работает и ничего не спрашивает: Enter не уходит.
+    let output = sandbox
+        .disp(&["yes", "site-31"])
+        .output()
+        .expect("disp yes");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("агент сейчас ничего не спрашивает"));
+    assert!(sandbox.zellij_calls(0).is_empty());
+
+    // Агент спросил разрешение: Enter нажимается в его панели.
+    sandbox.event("claude", ask, false);
+    let output = sandbox
+        .disp(&["yes", "site-31"])
+        .output()
+        .expect("disp yes");
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "ответ по умолчанию отправлен: zellij:dev#4\n"
+    );
+    assert_eq!(sandbox.zellij_calls(1), ["action write -p terminal_4 13"]);
+
+    // Запрос без id и чужой запрос.
+    assert_eq!(
+        sandbox.disp(&["yes"]).status().ok().and_then(|s| s.code()),
+        Some(2)
+    );
+    let output = sandbox
+        .disp(&["yes", "nothing"])
+        .output()
+        .expect("disp yes");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Не найдено: nothing"));
+}

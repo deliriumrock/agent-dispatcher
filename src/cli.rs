@@ -68,7 +68,7 @@ fn json_rows(board: &Board) -> String {
 fn table(board: &Board, cols: usize, all: bool, color: bool) -> String {
     let rows = board.visible(all);
     if rows.is_empty() {
-        return "Незакрытых сессий нет.  (disp ls -a покажет и принятые)".to_string();
+        return "Незакрытых сессий нет.  (disp ls -a покажет и убранные)".to_string();
     }
 
     let mut lines = vec![Counts::of(&rows).line()];
@@ -97,7 +97,7 @@ fn table(board: &Board, cols: usize, all: bool, color: bool) -> String {
             pad(&clip(row.place(), 18), 18),
             pad(&age(board.now - s.updated), 4),
             clip(&row.what(), what_width),
-            if s.accepted { "  [принято]" } else { "" },
+            if s.accepted { "  [убрано]" } else { "" },
         );
         lines.push(paint(&line, row.view.color(), color));
     }
@@ -196,7 +196,7 @@ fn details(row: &Row) -> String {
     lines.push(format!(
         "  статус:    {}{closed}{}",
         s.status.as_str(),
-        if s.accepted { " [принято]" } else { "" }
+        if s.accepted { " [убрано]" } else { "" }
     ));
     if !s.detail.is_empty() {
         lines.push(format!("  деталь:    {}", s.detail));
@@ -285,7 +285,7 @@ pub fn ok(args: &[String]) -> u8 {
             match board::accept(&mut row, board.now, force) {
                 Ok(Accepted::Yes) => {
                     accepted += 1;
-                    emit(&format!("принято: {summary}\n"));
+                    emit(&format!("убрано: {summary}\n"));
                 }
                 Ok(Accepted::StillActive) => {
                     skipped += 1;
@@ -301,7 +301,7 @@ pub fn ok(args: &[String]) -> u8 {
         }
     }
     if skipped > 0 {
-        warn("Активные сессии не приняты. Если сессия мертва: disp ok -f <id>");
+        warn("Активные сессии не убраны. Если сессия мертва: disp ok -f <id>");
     }
     if accepted == 0 {
         if skipped == 0 {
@@ -310,6 +310,55 @@ pub fn ok(args: &[String]) -> u8 {
         return 1;
     }
     0
+}
+
+/// `disp yes <id|задача>`: ответить агенту вариантом по умолчанию — нажать Enter в его
+/// панели zellij. Только для одной сессии, которая сейчас ждёт человека.
+pub fn yes(args: &[String]) -> u8 {
+    let [query] = args else {
+        warn("использование: disp yes <id|задача>");
+        return 2;
+    };
+    if query.starts_with('-') {
+        warn("использование: disp yes <id|задача>");
+        return 2;
+    }
+    let board = Board::load();
+    let found = matching(&board, query);
+    let row = match found.as_slice() {
+        [] => {
+            warn(&format!("Не найдено: {query}"));
+            return 1;
+        }
+        [row] => row,
+        _ => {
+            warn(&format!(
+                "Под «{query}» несколько сессий ({}); укажи id",
+                found
+                    .iter()
+                    .map(|row| row.sid.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            return 1;
+        }
+    };
+    // Enter уходит в панель агента: решаем по только что перечитанной записи.
+    let _lock = board.store.lock();
+    let Some(session) = store::read_session(&row.path) else {
+        warn(&format!("Не найдено: {query}"));
+        return 1;
+    };
+    match panes::approve(&session) {
+        Ok(text) => {
+            emit(&format!("{text}\n"));
+            0
+        }
+        Err(text) => {
+            warn(&text);
+            1
+        }
+    }
 }
 
 /// `disp name <id> <текст>`: дать строке понятное название.
@@ -342,13 +391,17 @@ pub fn name(args: &[String]) -> u8 {
 }
 
 /// `disp label`: поставить подписи `#номер название` на панели zellij всех открытых
-/// сессий сразу, не дожидаясь их следующего события.
+/// сессий из списка сразу, не дожидаясь их следующего события.
 ///
 /// У сессии, названия которой диспетчер ещё не знает, оно берётся из заголовка панели:
 /// иначе подпись заменила бы понятный заголовок программы именем задачи.
 pub fn label() -> u8 {
     let board = Board::load();
-    let open = |row: &Row| !row.session.ended && panes::target(&row.session.place).is_some();
+    // Убранные строки не подписываются: их запись могла устареть, а панель с тем же
+    // номером уже занята другой сессией.
+    let open = |row: &Row| {
+        !row.session.ended && !row.session.accepted && panes::target(&row.session.place).is_some()
+    };
     let rows: Vec<Row> = board.rows().into_iter().filter(open).collect();
 
     // Прежняя подпись скрывает заголовок программы: сначала снимаем её.
@@ -573,7 +626,7 @@ pub fn gc(args: &[String]) -> u8 {
         }
     }
     emit(&format!(
-        "удалено записей: {removed} (принятые и пустые старше {days} дн.)\n"
+        "удалено записей: {removed} (убранные и пустые старше {days} дн.)\n"
     ));
     0
 }
@@ -660,20 +713,22 @@ pub fn usage() -> String {
         "disp {VERSION} — диспетчер сессий AI-агентов
 
   disp               таблица незакрытых сессий (то же, что disp ls)
-  disp ls [-a]       -a: показать и принятые; --json: сырые данные
+  disp ls [-a]       -a: показать и убранные; --json: сырые данные
   disp watch         живая панель для отдельной панели zellij: стрелки — выбор,
-                     a — принять, g — перейти к агенту, t — лента времени,
+                     a — ответить агенту «да», x — убрать, g — перейти к агенту,
+                     t — лента времени,
                      ? — все клавиши
   disp watch --plain [сек]   таблица без управления, обновляется раз в N секунд
   disp gui           графическая оболочка: в панели терминала через term-everything,
                      с ключом --window — обычным окном на рабочем столе
   disp show <id>     подробности: промпт, последний ответ, подзадачи
-  disp ok <id|задача>...   принять результат (строка уходит из списка)
-  disp ok --ended    принять все закрытые сессии; --done: все законченные
-  disp ok -f <id>    принять активную сессию (если она на самом деле мертва)
+  disp ok <id|задача>...   убрать из списка: результат посмотрел
+  disp ok --ended    убрать все закрытые сессии; --done: все законченные
+  disp ok -f <id>    убрать активную сессию (если она на самом деле мертва)
+  disp yes <id>      ответить ждущему агенту «да»: Enter в его панели zellij
   disp name <id> <текст>   дать строке понятное название
   disp log [N]       журнал смен статуса: что происходило, пока тебя не было
-  disp gc [дней]     удалить принятые и пустые записи старше N дней (7)
+  disp gc [дней]     удалить убранные и пустые записи старше N дней (7)
   disp label         подписать панели zellij открытых сессий: «#номер название»
                      (сами обновляются при DISP_PANE_LABEL=1 в настройках)
   disp unlabel       снять эти подписи со всех панелей

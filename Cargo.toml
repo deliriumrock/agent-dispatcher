@@ -1,6 +1,6 @@
 [package]
 name = "disp"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2024"
 description = "Диспетчер сессий AI-агентов: Claude Code, Codex CLI, Gemini CLI"
 publish = false

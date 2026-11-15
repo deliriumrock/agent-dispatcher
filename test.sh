@@ -131,7 +131,7 @@ tbl="$("$DISP" ls)"
 echo "$tbl" | sed 's/^/     | /'
 check "строки не шире терминала" "0" "$(echo "$tbl" | jq -R --argjson w "$COLUMNS" 'select(length > $w)' | wc -l)"
 check "при узкой панели тоже" "0" "$(COLUMNS=96 "$DISP" ls | jq -R 'select(length > 96)' | wc -l)"
-has "сводка" "ждут тебя: 1 · не принято: 3 · работают: 0 · тихо: 0" "$tbl"
+has "сводка" "ждут тебя: 1 · готово: 3 · работают: 0 · тихо: 0" "$tbl"
 check "первой идёт ждущая сессия" "0c0de1" "$(echo "$tbl" | sed -n 3p | awk '{print $1}')"
 has "короткие ID различают сессии с общим префиксом UUIDv7" "0c0de2" "$tbl"
 has "подзадачи и фон в таблице" "1/3 ф1" "$tbl"
@@ -143,7 +143,7 @@ check "--json отдаёт массив из 4 строк" "4" "$("$DISP" ls --j
 echo "== 6. Приёмка"
 "$DISP" ok 00a1b2 >/dev/null
 hasnt "принятая сессия ушла из списка" "00a1b2" "$("$DISP" ls)"
-has "но видна с -a" "[принято]" "$("$DISP" ls -a)"
+has "но видна с -a" "[убрано]" "$("$DISP" ls -a)"
 "$DISP" ok --ended >/dev/null
 hasnt "ok --ended принял закрытую" "gemini" "$("$DISP" ls)"
 "$DISP" ok site-31 >/dev/null

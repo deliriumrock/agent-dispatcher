@@ -23,6 +23,7 @@ fn main() -> ExitCode {
         "watch" => tui::watch(rest),
         "show" => cli::show(rest),
         "ok" | "accept" => cli::ok(rest),
+        "yes" => cli::yes(rest),
         "name" => cli::name(rest),
         "log" => cli::log(rest),
         "gc" => cli::gc(rest),

@@ -170,7 +170,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, clock: &str) {
         None => vec![Span::styled(waiting, bar_muted()), gap()],
     };
     spans.extend([
-        part(counts.done, "не принято", "✓", View::Done),
+        part(counts.done, "готово", "✓", View::Done),
         gap(),
         part(counts.working, "работают", "●", View::Work),
         gap(),
@@ -234,7 +234,7 @@ fn draw_board(frame: &mut Frame, area: Rect, app: &mut App) {
         let hint = if app.show_all {
             "Сессий нет."
         } else {
-            "Незакрытых сессий нет.  Tab покажет и принятые."
+            "Незакрытых сессий нет.  Tab покажет и убранные."
         };
         frame.render_widget(Line::styled(hint, dim()), area);
         return;
@@ -884,7 +884,10 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 "работает"
             };
-            let text = format!("{} ещё {state}. Принять всё равно? y — да", row.sid);
+            let text = format!(
+                "{} ещё {state}. Убрать из списка всё равно? y — да",
+                row.sid
+            );
             frame.render_widget(Line::styled(clip_cells(&text, cells), base), inner);
         }
         Mode::Journal { .. } => {
@@ -929,14 +932,16 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                     .collect()
             };
             let (up, enter) = (hint("↑↓", "выбор"), hint("Enter", "подробности"));
-            let (accept, go) = (hint("a", "принять"), hint("g", "перейти"));
+            let (approve, remove) = (hint("a", "принять"), hint("x", "убрать"));
+            let go = hint("g", "перейти");
             let (help, quit) = (hint("?", "справка"), hint("q", "выход"));
             let variants = vec![
                 with_lane(
                     vec![
                         up.clone(),
                         enter.clone(),
-                        accept.clone(),
+                        approve.clone(),
+                        remove.clone(),
                         go.clone(),
                         hint("n", "назвать"),
                         hint("l", "журнал"),
@@ -948,21 +953,31 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                     vec![
                         up,
                         enter.clone(),
-                        accept.clone(),
+                        approve.clone(),
+                        remove.clone(),
                         go.clone(),
                         hint("s", "сортировка"),
                     ],
                     vec![help.clone(), quit.clone()],
                 ),
                 with_lane(
-                    vec![enter, accept.clone(), go.clone(), hint("s", "сорт.")],
+                    vec![
+                        enter,
+                        approve.clone(),
+                        remove.clone(),
+                        go.clone(),
+                        hint("s", "сорт."),
+                    ],
                     vec![help.clone(), quit],
                 ),
-                with_lane(vec![accept.clone(), go.clone()], vec![help.clone()]),
+                with_lane(
+                    vec![approve.clone(), remove.clone(), go.clone()],
+                    vec![help.clone()],
+                ),
                 if app.timeline {
                     with_lane(Vec::new(), vec![help.clone()])
                 } else {
-                    vec![accept, go, help.clone()]
+                    vec![approve, remove, go, help.clone()]
                 },
                 vec![help],
             ];
@@ -986,15 +1001,16 @@ fn draw_help(frame: &mut Frame, area: Rect) {
     let keys = [
         ("↑ ↓  j k", "выбор строки"),
         ("Enter  d", "подробности выбранной сессии"),
-        ("a  пробел", "принять; принятую — вернуть"),
-        ("u", "вернуть принятую в список"),
+        ("a", "принять: ответить агенту «да» (Enter в его панели)"),
+        ("x", "убрать из списка: результат посмотрел"),
+        ("u", "вернуть убранную в список"),
         ("g", "перейти в панель агента (zellij)"),
         ("n", "дать строке название"),
         ("l", "журнал смен статуса"),
         ("s  S", "сортировка: поле и направление"),
         ("t", "лента времени вместо «ЧТО»"),
         ("+  -", "масштаб ленты: от 30 минут до суток"),
-        ("Tab", "показать и принятые"),
+        ("Tab", "показать и убранные"),
         ("r", "перечитать"),
         ("q  Ctrl-C", "выход"),
     ];
@@ -1084,8 +1100,8 @@ mod tests {
         assert_eq!(
             lines[0],
             format!(
-                " ждут тебя: 1  не принято: 1 · работают: 1 · тихо: 0{}18:06:12  disp {VERSION}",
-                " ".repeat(110 - 52 - 15 - VERSION.len() - 1)
+                " ждут тебя: 1  готово: 1 · работают: 1 · тихо: 0{}18:06:12  disp {VERSION}",
+                " ".repeat(110 - 48 - 15 - VERSION.len() - 1)
             )
         );
         // Слева поле с отметкой выбранной строки; у колонки сортировки стрелка.
@@ -1106,7 +1122,11 @@ mod tests {
             lines[4],
             "  nbx142 ✓ ГОТОВО   codex  nbx-142        1/1  zellij:dev#3 10м  Задача nbx-142"
         );
-        assert!(lines[7].starts_with(" ↑↓ выбор  Enter подробности  a принять  g перейти"));
+        assert!(
+            lines[7].starts_with(" ↑↓ выбор  Enter подробности  a принять  x убрать  g перейти"),
+            "{}",
+            lines[7]
+        );
     }
 
     #[test]
@@ -1116,8 +1136,8 @@ mod tests {
         assert_eq!(
             lines[0],
             format!(
-                " ждут тебя: 1  не принято: 1 · работают: 1 · тихо: 0{}18:06:12  disp {VERSION}",
-                " ".repeat(80 - 52 - 15 - VERSION.len() - 1)
+                " ждут тебя: 1  готово: 1 · работают: 1 · тихо: 0{}18:06:12  disp {VERSION}",
+                " ".repeat(80 - 48 - 15 - VERSION.len() - 1)
             )
         );
         assert_eq!(
@@ -1151,7 +1171,7 @@ mod tests {
         );
         assert_eq!(lines[4], "  Задача trading-system");
         assert_eq!(lines[5], card(" ", "✓ ГОТОВО   nbx-142", "codex dev#3 10м"));
-        assert_eq!(lines[8], " a принять  g перейти  t лента  ? справка");
+        assert_eq!(lines[8], " a принять  x убрать  g перейти  ? справка");
     }
 
     #[test]
@@ -1205,13 +1225,13 @@ mod tests {
         assert_eq!(buffer[(15, 0)].fg, Color::Green);
         assert_eq!(buffer[(78, 0)].fg, BAR_MUTED);
         // В подсказке клавиша яркая и жирная, пояснение обычное.
-        // При 80 колонках первая подсказка — «Enter подробности».
-        assert_eq!(buffer[(1, 5)].symbol(), "E");
+        // При 80 колонках первая подсказка — «a принять».
+        assert_eq!(buffer[(1, 5)].symbol(), "a");
         assert_eq!(buffer[(1, 5)].fg, BAR_KEY);
         assert!(buffer[(1, 5)].modifier.contains(Modifier::BOLD));
-        assert_eq!(buffer[(7, 5)].symbol(), "п");
-        assert_eq!(buffer[(7, 5)].fg, BAR_FG);
-        assert!(!buffer[(7, 5)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[(3, 5)].symbol(), "п");
+        assert_eq!(buffer[(3, 5)].fg, BAR_FG);
+        assert!(!buffer[(3, 5)].modifier.contains(Modifier::BOLD));
 
         // Никто не ждёт: плашки нет, счётчик приглушён.
         app.rows[0].view = View::Work;
@@ -1225,7 +1245,7 @@ mod tests {
         assert_eq!(buffer[(1, 0)].fg, BAR_MUTED);
         let top: String = (0..80).map(|x| buffer[(x, 0)].symbol()).collect();
         assert!(
-            top.starts_with(" ждут тебя: 0 · не принято: 1 · работают: 2 · тихо: 0"),
+            top.starts_with(" ждут тебя: 0 · готово: 1 · работают: 2 · тихо: 0"),
             "{top}"
         );
 
@@ -1338,7 +1358,7 @@ mod tests {
     fn empty_board_and_tiny_window() {
         let mut app = App::default();
         let lines = screen(&mut app, 60, 5);
-        assert_eq!(lines[1], "Незакрытых сессий нет.  Tab покажет и принятые.");
+        assert_eq!(lines[1], "Незакрытых сессий нет.  Tab покажет и убранные.");
         let lines = screen(&mut app, 20, 3);
         assert_eq!(lines[0], "disp: мало места");
     }
@@ -1353,13 +1373,13 @@ mod tests {
         app.mode = Mode::Confirm;
         assert_eq!(
             screen(&mut app, 60, 6)[5],
-            " site31 ещё ждёт тебя. Принять всё равно? y — да"
+            " site31 ещё ждёт тебя. Убрать из списка всё равно? y — да"
         );
         app.mode = Mode::Board;
-        app.notify("принято: nbx-142 [codex] Задача nbx-142", false);
+        app.notify("убрано: nbx-142 [codex] Задача nbx-142", false);
         assert_eq!(
             screen(&mut app, 60, 6)[5],
-            " принято: nbx-142 [codex] Задача nbx-142"
+            " убрано: nbx-142 [codex] Задача nbx-142"
         );
     }
 
@@ -1410,7 +1430,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("принять; принятую — вернуть"))
+                .any(|line| line.contains("убрать из списка: результат посмотрел"))
         );
     }
 
@@ -1424,7 +1444,7 @@ mod tests {
         assert_eq!(row.headline(), "Поправь цены");
         row.session.detail = "ход прерван".to_string();
         row.session.accepted = true;
-        assert_eq!(row.headline(), "[принято] ход прерван · Поправь цены");
+        assert_eq!(row.headline(), "[убрано] ход прерван · Поправь цены");
     }
 
     /// Панель с включённой лентой: получасовое окно и журнал трёх сессий.
