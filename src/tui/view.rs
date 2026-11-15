@@ -807,21 +807,22 @@ fn hint(key: &'static str, text: &str) -> Hint {
     (key, text.to_string())
 }
 
-/// Ширина подсказок, записанных в строку через два пробела.
+/// Ширина подсказок, записанных в строку через пробел.
 fn hints_width(hints: &[Hint]) -> usize {
     let texts: usize = hints
         .iter()
         .map(|(key, text)| width(key) + usize::from(!text.is_empty()) + width(text))
         .sum();
-    texts + 2 * hints.len().saturating_sub(1)
+    texts + hints.len().saturating_sub(1)
 }
 
-/// Подсказки одной строкой: клавиши яркие, пояснения обычные.
+/// Подсказки одной строкой: клавиши яркие, пояснения обычные. Между подсказками
+/// один пробел: границу и так видно по яркой клавише, а место в узкой панели дорого.
 fn hints_line(hints: &[Hint]) -> Line<'static> {
     let mut spans = Vec::new();
     for (index, (key, text)) in hints.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::styled("  ", bar()));
+            spans.push(Span::styled(" ", bar()));
         }
         spans.push(Span::styled(*key, bar_key()));
         if !text.is_empty() {
@@ -962,7 +963,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                 ),
                 with_lane(
                     vec![
-                        enter,
+                        enter.clone(),
                         approve.clone(),
                         remove.clone(),
                         go.clone(),
@@ -971,14 +972,32 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                     vec![help.clone(), quit],
                 ),
                 with_lane(
-                    vec![approve.clone(), remove.clone(), go.clone()],
+                    vec![
+                        enter.clone(),
+                        approve.clone(),
+                        remove.clone(),
+                        go.clone(),
+                        hint("s", "сорт."),
+                    ],
                     vec![help.clone()],
                 ),
-                if app.timeline {
-                    with_lane(Vec::new(), vec![help.clone()])
-                } else {
-                    vec![approve, remove, go, help.clone()]
-                },
+                // Дальше по мере сужения уходят сортировка, лента, справка и действия,
+                // а Enter держится дольше всех: без него не узнать, что строку можно
+                // раскрыть.
+                with_lane(
+                    vec![enter.clone(), approve.clone(), remove.clone(), go.clone()],
+                    vec![help.clone()],
+                ),
+                vec![
+                    enter.clone(),
+                    approve.clone(),
+                    remove.clone(),
+                    go.clone(),
+                    help.clone(),
+                ],
+                vec![enter.clone(), approve.clone(), remove.clone(), go.clone()],
+                vec![enter.clone(), approve, remove],
+                vec![enter, help.clone()],
                 vec![help],
             ];
             let hints = pick_hints(variants, cells.saturating_sub(width(&position)));
@@ -1123,7 +1142,7 @@ mod tests {
             "  nbx142 ✓ ГОТОВО   codex  nbx-142        1/1  zellij:dev#3 10м  Задача nbx-142"
         );
         assert!(
-            lines[7].starts_with(" ↑↓ выбор  Enter подробности  a принять  x убрать  g перейти"),
+            lines[7].starts_with(" ↑↓ выбор Enter подробности a принять x убрать g перейти"),
             "{}",
             lines[7]
         );
@@ -1171,7 +1190,24 @@ mod tests {
         );
         assert_eq!(lines[4], "  Задача trading-system");
         assert_eq!(lines[5], card(" ", "✓ ГОТОВО   nbx-142", "codex dev#3 10м"));
-        assert_eq!(lines[8], " a принять  x убрать  g перейти  ? справка");
+        assert_eq!(lines[8], " Enter подробности a принять x убрать g перейти");
+    }
+
+    #[test]
+    fn enter_hint_outlasts_the_others() {
+        // Панель шириной 79 колонок, как у `disp watch` рядом с агентами: выход и
+        // полные названия уходят из подсказки раньше, чем Enter.
+        let mut app = app();
+        let lines = screen(&mut app, 79, 6);
+        assert!(
+            lines[5].starts_with(
+                " Enter подробности a принять x убрать g перейти s сорт. t лента ? справка"
+            ),
+            "{}",
+            lines[5]
+        );
+        let lines = screen(&mut app, 40, 6);
+        assert!(lines[5].starts_with(" Enter подробности ? справка"), "{}", lines[5]);
     }
 
     #[test]
@@ -1225,13 +1261,13 @@ mod tests {
         assert_eq!(buffer[(15, 0)].fg, Color::Green);
         assert_eq!(buffer[(78, 0)].fg, BAR_MUTED);
         // В подсказке клавиша яркая и жирная, пояснение обычное.
-        // При 80 колонках первая подсказка — «a принять».
-        assert_eq!(buffer[(1, 5)].symbol(), "a");
+        // При 80 колонках первая подсказка — «Enter подробности».
+        assert_eq!(buffer[(1, 5)].symbol(), "E");
         assert_eq!(buffer[(1, 5)].fg, BAR_KEY);
         assert!(buffer[(1, 5)].modifier.contains(Modifier::BOLD));
-        assert_eq!(buffer[(3, 5)].symbol(), "п");
-        assert_eq!(buffer[(3, 5)].fg, BAR_FG);
-        assert!(!buffer[(3, 5)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[(7, 5)].symbol(), "п");
+        assert_eq!(buffer[(7, 5)].fg, BAR_FG);
+        assert!(!buffer[(7, 5)].modifier.contains(Modifier::BOLD));
 
         // Никто не ждёт: плашки нет, счётчик приглушён.
         app.rows[0].view = View::Work;
@@ -1523,8 +1559,12 @@ mod tests {
         assert_eq!(buffer[(51, 2)].bg, Color::Yellow);
         assert_eq!(buffer[(53 + 12, 2)].bg, Color::Reset);
         assert!(app.lanes.is_empty(), "символьной ленте картинки не нужны");
+        // В 80 колонках подсказка ленты уступает место Enter и действиям, в широкой
+        // панели она есть.
         let hint = line(5);
-        assert!(hint.contains("t лента 30м  +/- масштаб"), "{hint}");
+        assert!(hint.starts_with(" Enter подробности"), "{hint}");
+        let lines = screen(&mut app, 120, 6);
+        assert!(lines[5].contains("t лента 30м +/- масштаб"), "{}", lines[5]);
     }
 
     #[test]
