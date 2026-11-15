@@ -24,8 +24,9 @@ mod tui;
 
 use std::process::ExitCode;
 
-/// Версия программы.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Версия программы в виде `0.8.001`: третья цифра — номер сборки, всегда тремя
+/// знаками. Собирается в `build.rs` из версии в `Cargo.toml`.
+pub const VERSION: &str = env!("DISP_VERSION");
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args_os()
