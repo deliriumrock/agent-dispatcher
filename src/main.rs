@@ -1,32 +1,8 @@
-//! disp — диспетчер сессий AI-агентов (Claude Code, Codex CLI, Gemini CLI).
-//!
-//! Хуки агентов вызывают `disp hook <агент>`; программа ведёт по одному JSON-файлу
-//! на сессию и показывает общую таблицу: что работает, что ждёт человека, что закончено
-//! и ещё не принято. Формат файлов и команды те же, что у прежней bash-версии.
-//!
-//! Состояние: `${XDG_STATE_HOME:-~/.local/state}/disp/`.
-//! Настройки: `${XDG_CONFIG_HOME:-~/.config}/disp/env` (строки `КЛЮЧ=значение`).
-
-mod board;
-mod cli;
-mod config;
-mod detect;
-mod error;
-mod hook;
-mod install;
-mod model;
-mod notify;
-mod panes;
-mod store;
-mod text;
-mod timeline;
-mod tui;
+//! Программа `disp`: разбирает команду и передаёт её ядру диспетчера.
 
 use std::process::ExitCode;
 
-/// Версия программы в виде `0.8.001`: третья цифра — номер сборки, всегда тремя
-/// знаками. Собирается в `build.rs` из версии в `Cargo.toml`.
-pub const VERSION: &str = env!("DISP_VERSION");
+use disp::{VERSION, cli, hook, install, text, tui};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args_os()
@@ -54,6 +30,7 @@ fn main() -> ExitCode {
         "label" => cli::label(),
         "unlabel" => cli::unlabel(),
         "repair" => cli::repair(),
+        "gui" => cli::gui(rest),
         "config" => install::config(rest),
         "install" => install::install(rest),
         "doctor" => cli::doctor(),

@@ -3,12 +3,13 @@
 //! Запись атомарная (временный файл и переименование), поэтому читать файлы можно
 //! в любой момент. Блокировка общая с bash-версией: тот же файл и тот же `flock`.
 
+use std::ffi::OsString;
 use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -128,6 +129,33 @@ impl Store {
         file.write_all(line.as_bytes())?;
         Ok(())
     }
+}
+
+/// Отпечаток каталога сессий: имена файлов, время изменения и размер.
+pub type Signature = Vec<(OsString, Option<SystemTime>, u64)>;
+
+/// Отпечаток каталога сессий. Файлы сессий заменяются целиком, поэтому любое событие
+/// агента меняет время изменения файла: по отпечатку видно, пора ли перечитывать.
+pub fn dir_signature(dir: &Path) -> Signature {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Signature = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|entry| {
+            let meta = entry.metadata().ok()?;
+            Some((entry.file_name(), meta.modified().ok(), meta.len()))
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// Время изменения и размер файла; `None`, если файла нет.
+pub fn file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
+    let meta = fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
 }
 
 /// Читает файл сессии. `None`, если файла нет или это не запись сессии.

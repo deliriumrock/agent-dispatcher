@@ -1,0 +1,662 @@
+// Окно графической оболочки диспетчера.
+//
+// Здесь только внешний вид. Данные (строки, подробности, сообщения) приходят из Rust,
+// туда же уходят клавиши и щелчки: вся логика общая с текстовой панелью.
+
+import { LineEdit } from "std-widgets.slint";
+
+// Отрезок ленты времени: доли ширины ленты и состояние.
+export struct Segment {
+    start: float,
+    width: float,
+    // 0 — простой, 1 — готово, 2 — тихо, 3 — работает, 4 — сбой, 5 — ждёт.
+    phase: int,
+}
+
+// Подпись деления шкалы над лентами.
+export struct Tick {
+    position: float,
+    label: string,
+}
+
+// Строка списка: одна сессия агента.
+export struct SessionRow {
+    sid: string,
+    // 0 — ждёт, 1 — сбой, 2 — прервана, 3 — работает, 4 — тихо, 5 — простой, 6 — готово.
+    kind: int,
+    status: string,
+    agent: string,
+    task: string,
+    place: string,
+    age: string,
+    headline: string,
+    subtasks: string,
+    accepted: bool,
+    segments: [Segment],
+}
+
+// Поле подробностей выбранной сессии.
+export struct DetailField {
+    key: string,
+    value: string,
+    // 0 — обычный текст, 1 — цветом статуса, 2 — приглушённо.
+    tone: int,
+}
+
+// Подсказка в нижней полосе: клавиша и что она делает.
+export struct Hint {
+    key: string,
+    text: string,
+}
+
+export global Theme {
+    out property <color> window: #16161e;
+    out property <color> bar: #24283b;
+    out property <color> card: #1f2335;
+    out property <color> card-hover: #262a40;
+    out property <color> card-selected: #2f3552;
+    out property <color> line: #2f334d;
+    out property <color> text: #c0caf5;
+    out property <color> bright: #ffffff;
+    out property <color> muted: #737aa2;
+
+    out property <color> waiting: #f8c438;
+    out property <color> failed: #f7768e;
+    out property <color> working: #46bed7;
+    out property <color> quiet: #a078be;
+    out property <color> idle: #737aa2;
+    out property <color> done: #60c46e;
+
+    // Цвет строки по её статусу.
+    pure public function status(kind: int) -> color {
+        if (kind == 0) {
+            return self.waiting;
+        }
+        if (kind == 1 || kind == 2) {
+            return self.failed;
+        }
+        if (kind == 3) {
+            return self.working;
+        }
+        if (kind == 4) {
+            return self.quiet;
+        }
+        if (kind == 5) {
+            return self.idle;
+        }
+        return self.done;
+    }
+
+    // Цвет отрезка ленты по состоянию.
+    pure public function phase(phase: int) -> color {
+        if (phase == 5) {
+            return self.waiting;
+        }
+        if (phase == 4) {
+            return self.failed;
+        }
+        if (phase == 3) {
+            return self.working;
+        }
+        if (phase == 2) {
+            return self.quiet;
+        }
+        if (phase == 1) {
+            return self.done;
+        }
+        return self.idle;
+    }
+
+    // Высота отрезка ленты в долях высоты строки ленты: чем важнее, тем выше.
+    pure public function phase-height(phase: int) -> float {
+        if (phase >= 4) {
+            return 0.78;
+        }
+        if (phase >= 2) {
+            return 0.46;
+        }
+        if (phase == 1) {
+            return 0.22;
+        }
+        return 0.1;
+    }
+}
+
+// Счётчик в верхней полосе: плашка, когда не ноль.
+component Badge inherits Rectangle {
+    in property <string> label;
+    in property <int> count;
+    in property <color> accent;
+    in property <bool> filled;
+
+    height: 22px;
+    width: content.preferred-width + 16px;
+    border-radius: 11px;
+    background: root.filled && root.count > 0 ? root.accent : transparent;
+
+    content := HorizontalLayout {
+        x: 8px;
+        spacing: 5px;
+        Text {
+            text: root.label;
+            color: root.filled && root.count > 0 ? #000000 : (root.count > 0 ? root.accent : Theme.muted);
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+
+        Text {
+            text: root.count;
+            color: root.filled && root.count > 0 ? #000000 : (root.count > 0 ? Theme.bright : Theme.muted);
+            font-size: 13px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Лента времени одной сессии.
+component Lane inherits Rectangle {
+    in property <[Segment]> segments;
+    in property <[Tick]> ticks;
+
+    // Ось: тонкая линия во всю ширину.
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        height: 1px;
+        background: Theme.line;
+    }
+
+    for tick in root.ticks: Rectangle {
+        x: root.width * tick.position;
+        y: parent.height * 0.2;
+        width: 1px;
+        height: parent.height * 0.6;
+        background: Theme.line;
+    }
+
+    for segment in root.segments: Rectangle {
+        x: root.width * segment.start;
+        width: max(2px, root.width * segment.width);
+        height: max(2px, root.height * Theme.phase-height(segment.phase));
+        y: (root.height - self.height) / 2;
+        border-radius: min(3px, self.height / 2);
+        background: Theme.phase(segment.phase);
+    }
+}
+
+// Строка списка.
+component SessionItem inherits Rectangle {
+    in property <SessionRow> session;
+    in property <[Tick]> ticks;
+    in property <bool> selected;
+    in property <length> lane-width;
+    callback clicked();
+    callback activated();
+
+    // Строка, которая требует человека, подсвечена своим цветом.
+    property <bool> alarm: (root.session.kind <= 2) && !root.session.accepted;
+    property <color> accent: Theme.status(root.session.kind);
+
+    height: 52px;
+    background: root.selected ? Theme.card-selected : (touch.has-hover ? Theme.card-hover : transparent);
+
+    if root.alarm: Rectangle {
+        background: root.accent;
+        opacity: root.selected ? 0.26 : 0.16;
+    }
+
+    // Полоска статуса слева; у выбранной строки она шире.
+    Rectangle {
+        x: 0;
+        width: root.selected ? 5px : 3px;
+        background: root.session.accepted ? Theme.muted : root.accent;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+        double-clicked => {
+            root.activated();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 12px;
+        spacing: 14px;
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 3px;
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                // Статус плашкой.
+                Rectangle {
+                    width: status.preferred-width + 14px;
+                    height: 20px;
+                    border-radius: 10px;
+                    background: root.session.accepted ? Theme.line : root.accent;
+                    status := Text {
+                        text: root.session.status;
+                        color: root.session.accepted ? Theme.muted : #000000;
+                        font-size: 12px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Text {
+                    text: root.session.task;
+                    color: root.session.accepted ? Theme.muted : Theme.bright;
+                    font-size: 15px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+
+                if root.session.subtasks != "": Text {
+                    text: root.session.subtasks;
+                    color: Theme.text;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: root.session.agent + " · " + root.session.place + " · " + root.session.age;
+                    color: Theme.muted;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                }
+            }
+
+            Text {
+                text: root.session.headline;
+                color: root.session.accepted ? Theme.muted : Theme.text;
+                font-size: 13px;
+                overflow: elide;
+            }
+        }
+
+        if root.lane-width > 0: Lane {
+            width: root.lane-width;
+            segments: root.session.segments;
+            ticks: root.ticks;
+        }
+    }
+
+    // Разделитель между строками.
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.line;
+        opacity: 0.6;
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "disp";
+    background: Theme.window;
+    preferred-width: 960px;
+    preferred-height: 560px;
+    min-width: 360px;
+    min-height: 200px;
+    default-font-size: 13px;
+
+    // Данные.
+    in property <[SessionRow]> rows;
+    in property <[Tick]> ticks;
+    in property <[DetailField]> details;
+    in property <[Hint]> hints;
+    in property <int> waiting;
+    in property <int> unaccepted;
+    in property <int> working;
+    in property <int> silent;
+    in property <string> clock;
+    in property <string> version;
+    in property <string> sort;
+    in property <string> span;
+    in property <bool> show-all;
+    in property <bool> details-open;
+    in property <int> selected: 0;
+    in property <int> selected-kind: 5;
+    in property <string> selected-title;
+    // Сообщение о действии, вопрос о приёмке, ввод названия.
+    in property <string> notice;
+    in property <bool> notice-error;
+    in property <string> question;
+    in property <bool> renaming;
+
+    // Клавиша: текст, зажат ли Ctrl. Возвращает, обработана ли она.
+    callback key(string, bool) -> bool;
+    callback select(int);
+    callback activate(int);
+    callback command(string);
+    callback rename(string);
+
+    property <color> selected-accent: Theme.status(root.selected-kind);
+    property <length> row-height: 52px;
+    // Ширина ленты времени; ноль — лент нет. Её считает программа по ширине окна:
+    // привязка к ширине окна прямо здесь зациклила бы расчёт раскладки.
+    in property <length> lane-width;
+
+    // Прокручивает список так, чтобы выбранная строка была видна.
+    public function reveal() {
+        if (root.selected * root.row-height < -list.content-y) {
+            list.content-y = -root.selected * root.row-height;
+        } else if ((root.selected + 1) * root.row-height > -list.content-y + list.height) {
+            list.content-y = list.height - (root.selected + 1) * root.row-height;
+        }
+    }
+
+    // Передаёт ввод строке названия.
+    public function start-rename() {
+        name-input.text = "";
+        name-input.focus();
+    }
+
+    // Возвращает ввод списку.
+    public function focus-list() {
+        keys.focus();
+    }
+
+    forward-focus: keys;
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            return root.key(event.text, event.modifiers.control) ? accept : reject;
+        }
+    }
+
+    VerticalLayout {
+        // Верхняя полоса: счётчики, сортировка, время.
+        Rectangle {
+            height: 36px;
+            background: Theme.bar;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 8px;
+                alignment: stretch;
+
+                Text {
+                    text: "disp";
+                    color: Theme.bright;
+                    font-size: 15px;
+                    font-weight: 800;
+                    vertical-alignment: center;
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Badge {
+                            label: "ждут тебя";
+                            count: root.waiting;
+                            accent: Theme.waiting;
+                            filled: true;
+                        }
+
+                        Badge {
+                            label: "готово";
+                            count: root.unaccepted;
+                            accent: Theme.done;
+                        }
+
+                        Badge {
+                            label: "работают";
+                            count: root.working;
+                            accent: Theme.working;
+                        }
+
+                        Badge {
+                            label: "тихо";
+                            count: root.silent;
+                            accent: Theme.quiet;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+
+                Text {
+                    text: (root.show-all ? "все · " : "") + "сорт: " + root.sort;
+                    color: Theme.text;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: root.clock;
+                    color: Theme.muted;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: "disp " + root.version;
+                    color: Theme.muted;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // Шкала над лентами.
+        if root.lane-width > 0: Rectangle {
+            height: 18px;
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 12px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+
+                axis := Rectangle {
+                    width: root.lane-width;
+                    Text {
+                        x: 0;
+                        text: root.span;
+                        color: Theme.text;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+
+                    for tick in root.ticks: Text {
+                        x: axis.width * tick.position;
+                        text: tick.label;
+                        color: Theme.muted;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // Список сессий.
+        list := Flickable {
+            vertical-stretch: 1;
+            content-height: root.rows.length * root.row-height;
+            content-width: self.width;
+
+            for row[index] in root.rows: SessionItem {
+                y: index * root.row-height;
+                width: list.width;
+                session: row;
+                ticks: root.ticks;
+                selected: index == root.selected;
+                lane-width: root.lane-width;
+                clicked => {
+                    root.select(index);
+                    keys.focus();
+                }
+                activated => {
+                    root.activate(index);
+                }
+            }
+
+            if root.rows.length == 0: Text {
+                x: 14px;
+                y: 12px;
+                text: root.show-all ? "Сессий нет." : "Незакрытых сессий нет.  Tab покажет и убранные.";
+                color: Theme.muted;
+            }
+        }
+
+        // Подробности выбранной сессии.
+        if root.details-open && root.details.length > 0: Rectangle {
+            background: Theme.card;
+            vertical-stretch: 0;
+            max-height: 340px;
+            clip: true;
+
+            Rectangle {
+                y: 0;
+                height: 2px;
+                background: root.selected-accent;
+            }
+
+            details-box := VerticalLayout {
+                padding: 12px;
+                padding-top: 10px;
+                spacing: 4px;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: root.selected-title;
+                        color: Theme.bright;
+                        font-size: 14px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+
+                    for action in [
+                        { name: "approve", label: "Принять" },
+                        { name: "remove", label: "Убрать" },
+                        { name: "focus", label: "Перейти" },
+                        { name: "rename", label: "Назвать" },
+                    ]: Rectangle {
+                        width: label.preferred-width + 20px;
+                        height: 24px;
+                        border-radius: 5px;
+                        background: press.has-hover ? Theme.card-selected : Theme.line;
+                        label := Text {
+                            text: action.label;
+                            color: Theme.bright;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        press := TouchArea {
+                            clicked => {
+                                root.command(action.name);
+                            }
+                        }
+                    }
+                }
+
+                for field in root.details: HorizontalLayout {
+                    spacing: 10px;
+                    Text {
+                        width: 76px;
+                        text: field.key;
+                        color: Theme.muted;
+                        font-size: 12px;
+                    }
+
+                    Text {
+                        text: field.value;
+                        color: field.tone == 1 ? root.selected-accent : (field.tone == 2 ? Theme.muted : Theme.text);
+                        font-size: 12px;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+        }
+
+        // Нижняя полоса: подсказки, сообщение, вопрос или ввод названия.
+        Rectangle {
+            height: 30px;
+            background: root.question != "" ? Theme.waiting : Theme.bar;
+
+            // Строка ввода существует всегда и только прячется: иначе ей нельзя передать ввод.
+            Rectangle {
+                visible: root.renaming;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 8px;
+                    Text {
+                        text: "название:";
+                        color: Theme.bright;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+
+                    name-input := LineEdit {
+                        horizontal-stretch: 1;
+                        placeholder-text: "Enter — сохранить, пустая строка — отмена";
+                        accepted(text) => {
+                            root.rename(text);
+                        }
+                    }
+                }
+            }
+
+            if !root.renaming && root.question != "": Text {
+                x: 12px;
+                text: root.question;
+                color: #000000;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+
+            if !root.renaming && root.question == "" && root.notice != "": Text {
+                x: 12px;
+                text: root.notice;
+                color: root.notice-error ? Theme.failed : Theme.done;
+                vertical-alignment: center;
+                overflow: elide;
+                width: parent.width - 24px;
+            }
+
+            if !root.renaming && root.question == "" && root.notice == "": HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 14px;
+                alignment: start;
+                for hint in root.hints: HorizontalLayout {
+                    spacing: 5px;
+                    Text {
+                        text: hint.key;
+                        color: Theme.bright;
+                        font-weight: 700;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: hint.text;
+                        color: Theme.text;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}

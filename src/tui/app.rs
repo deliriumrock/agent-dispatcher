@@ -6,6 +6,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::board::{self, Counts, Row, Sort};
 use crate::model::View;
 use crate::store::JournalEvent;
+use crate::text::latin_key;
 use crate::timeline::{History, Segment, Window};
 
 /// Сколько секунд сообщение о результате действия остаётся в нижней строке.
@@ -227,7 +228,7 @@ impl App {
     fn board_key(&mut self, code: KeyCode) -> Option<Command> {
         self.notice = None;
         let code = match code {
-            KeyCode::Char(ch) => KeyCode::Char(latin(ch)),
+            KeyCode::Char(ch) => KeyCode::Char(latin_key(ch)),
             other => other,
         };
         match code {
@@ -333,7 +334,7 @@ impl App {
 
     fn journal_key(&mut self, code: KeyCode, scroll: usize) {
         let code = match code {
-            KeyCode::Char(ch) => KeyCode::Char(latin(ch)),
+            KeyCode::Char(ch) => KeyCode::Char(latin_key(ch)),
             other => other,
         };
         let last = self.journal.len().saturating_sub(1);
@@ -380,30 +381,6 @@ impl App {
     fn select(&mut self, index: usize) {
         self.selected = index.min(self.rows.len().saturating_sub(1));
         self.selected_key = self.selected_row().map(Row::key);
-    }
-}
-
-/// Латинская буква той же клавиши в русской раскладке: панелью можно управлять,
-/// не переключая раскладку.
-fn latin(ch: char) -> char {
-    match ch {
-        'й' | 'Й' => 'q',
-        'ф' => 'a',
-        'ч' | 'Ч' => 'x',
-        'Ф' => 'A',
-        'п' | 'П' => 'g',
-        'т' | 'Т' => 'n',
-        'д' | 'Д' => 'l',
-        'о' | 'О' => 'j',
-        'л' | 'Л' => 'k',
-        'в' | 'В' => 'd',
-        'к' | 'К' => 'r',
-        'г' | 'Г' => 'u',
-        'р' | 'Р' => 'h',
-        'е' | 'Е' => 't',
-        'ы' => 's',
-        'Ы' => 'S',
-        other => other,
     }
 }
 
@@ -740,7 +717,7 @@ pub mod tests {
     #[test]
     fn notice_expires() {
         let mut app = app();
-        app.notify("принято: x", false);
+        app.notify("убрано: x", false);
         app.set_rows(Vec::new(), 1004);
         assert!(app.notice.is_some());
         app.set_rows(Vec::new(), 1005);

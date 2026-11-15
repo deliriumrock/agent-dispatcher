@@ -3,13 +3,15 @@
 #   make           собрать
 #   make test      модульные тесты и приёмочный набор test.sh
 #   make install   собрать и поставить в ~/.local/bin/disp
+#   make gui           собрать графическую оболочку disp-gui
+#   make install-gui   собрать её и поставить в ~/.local/bin/disp-gui
 #   make bump      повысить номер сборки: 0.8.001 → 0.8.002
 
 PREFIX ?= $(HOME)/.local
 BIN := $(PREFIX)/bin/disp
 BUILT := target/release/disp
 
-.PHONY: build test install bump
+.PHONY: build test install gui install-gui bump
 
 build:
 	cargo build --release
@@ -25,9 +27,19 @@ install: build
 	mv -f $(BIN).new $(BIN)
 	@$(BIN) --version
 
-# Номер сборки — третья цифра версии в первой строке `version = "…"` в Cargo.toml.
-# Повышается перед каждой сборкой, которая уходит в работу, чтобы по шапке панели
-# и `disp --version` было видно, что запущена новая.
+# Графическая оболочка — отдельный пакет с тяжёлыми зависимостями: собирается минуты две.
+gui:
+	cargo build --release -p disp-gui
+
+install-gui: gui
+	install -m 755 target/release/disp-gui $(PREFIX)/bin/disp-gui.new
+	mv -f $(PREFIX)/bin/disp-gui.new $(PREFIX)/bin/disp-gui
+	@$(PREFIX)/bin/disp-gui --help | head -1
+
+# Номер сборки — третья цифра версии в первой строке `version = "…"` в Cargo.toml
+# (раздел [workspace.package]: версия общая для disp и disp-gui). Повышается перед
+# каждой сборкой, которая уходит в работу, чтобы по шапке панели и `disp --version`
+# было видно, что запущена новая.
 bump:
 	@awk 'BEGIN { FS = OFS = "\"" } \
 	     !done && /^version = "/ { split($$2, v, "."); $$2 = v[1] "." v[2] "." v[3] + 1; \

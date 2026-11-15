@@ -1,11 +1,22 @@
 [package]
 name = "disp"
-# Третья цифра — номер сборки, показывается тремя знаками: 0.8.1 — это «0.8.001».
-# Повышается командой `make bump` перед каждой сборкой, которая уходит в работу.
-version = "0.8.1"
+version.workspace = true
 edition = "2024"
 description = "Диспетчер сессий AI-агентов: Claude Code, Codex CLI, Gemini CLI"
 publish = false
+
+# Графическая оболочка — отдельный пакет: её тяжёлые зависимости не должны попадать
+# в `disp`, который хуки агентов запускают на каждое событие. `cargo build` в корне
+# собирает только `disp`; оболочка собирается как `cargo build -p disp-gui`.
+[workspace]
+members = [".", "gui"]
+default-members = ["."]
+
+# Версия общая для `disp` и `disp-gui`.
+[workspace.package]
+# Третья цифра — номер сборки, показывается тремя знаками: 0.8.1 — это «0.8.001».
+# Повышается командой `make bump` перед каждой сборкой, которая уходит в работу.
+version = "0.8.2"
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

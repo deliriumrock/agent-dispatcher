@@ -3,8 +3,11 @@
 
 use std::io::{self, Write};
 
+use chrono::{DateTime, Local};
 use serde_json::Value;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+use crate::config::env_nonempty;
 
 /// Текст значения JSON: строка как есть, всё остальное — компактным JSON.
 pub fn value_text(value: &Value) -> String {
@@ -125,6 +128,55 @@ pub fn wrap(text: &str, cells: usize) -> Vec<String> {
         lines.push(line);
     }
     lines
+}
+
+/// Путь с `~` вместо домашнего каталога.
+pub fn home_relative(path: &str) -> String {
+    match env_nonempty("HOME") {
+        Some(home) if path == home => "~".to_string(),
+        Some(home) => match path.strip_prefix(&format!("{home}/")) {
+            Some(rest) => format!("~/{rest}"),
+            None => path.to_string(),
+        },
+        None => path.to_string(),
+    }
+}
+
+/// Текст без разметки Markdown: в одной строке таблицы звёздочки и решётки только мешают.
+pub fn unmarked(text: &str) -> String {
+    let cleaned: String = text.chars().filter(|ch| !matches!(ch, '*' | '`')).collect();
+    cleaned.trim_start_matches(['#', ' ']).to_string()
+}
+
+/// Местное время в заданном формате; пусто, если метка времени некорректна.
+pub fn local_time(ts: i64, format: &str) -> String {
+    DateTime::from_timestamp(ts, 0)
+        .map(|time| time.with_timezone(&Local).format(format).to_string())
+        .unwrap_or_default()
+}
+
+/// Латинская буква той же клавиши в русской раскладке: панелью можно управлять,
+/// не переключая раскладку.
+pub fn latin_key(ch: char) -> char {
+    match ch {
+        'й' | 'Й' => 'q',
+        'ф' => 'a',
+        'ч' | 'Ч' => 'x',
+        'Ф' => 'A',
+        'п' | 'П' => 'g',
+        'т' | 'Т' => 'n',
+        'д' | 'Д' => 'l',
+        'о' | 'О' => 'j',
+        'л' | 'Л' => 'k',
+        'в' | 'В' => 'd',
+        'к' | 'К' => 'r',
+        'г' | 'Г' => 'u',
+        'р' | 'Р' => 'h',
+        'е' | 'Е' => 't',
+        'ы' => 's',
+        'Ы' => 'S',
+        other => other,
+    }
 }
 
 /// Возраст для колонки таблицы: `45с`, `12м`, `3ч`, `2д`.
