@@ -4,6 +4,9 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
+use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
+use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
@@ -410,6 +413,89 @@ pub fn repair() -> u8 {
     0
 }
 
+/// `disp gui [--window]`: графическая оболочка.
+///
+/// В панели терминала, который сообщает свой размер в пикселях, оболочка показывается
+/// прямо в панели через term-everything; иначе и с ключом `--window` — обычным окном
+/// на рабочем столе. Команда заменяет собой процесс `disp`.
+pub fn gui(args: &[String]) -> u8 {
+    let board = Board::load();
+    let Some(program) = gui_program(&board) else {
+        warn("disp gui: не найдена программа disp-gui (собрать и поставить: make install-gui)");
+        return 1;
+    };
+    let window = args.iter().any(|arg| arg == "--window");
+    let size = if window { None } else { pane_pixels() };
+    let mut command = match (size, term_everything(&board)) {
+        (Some((width, height)), Some(compositor)) => {
+            let size = format!("{width}x{height}");
+            let mut command = Command::new(compositor);
+            // term-everything на Wayland считает кадр RGBA, хотя программы отдают BGRA:
+            // без подсказки красный и синий меняются местами.
+            if env::var_os("TERM_EVERYTHING_PIXEL_TYPE").is_none() {
+                command.env("TERM_EVERYTHING_PIXEL_TYPE", "BGRA8");
+            }
+            command
+                .args(["--virtual-monitor-size", &size, "--"])
+                .arg(&program)
+                .args(["--size", &size]);
+            command
+        }
+        (Some(_), None) => {
+            warn(
+                "disp gui: term-everything не найден, окно откроется на рабочем столе \
+                 (путь к нему: DISP_TERM_EVERYTHING в настройках)",
+            );
+            Command::new(&program)
+        }
+        (None, _) => Command::new(&program),
+    };
+    // При успехе управление сюда не возвращается.
+    let err = command.exec();
+    warn(&format!("disp gui: не удалось запустить: {err}"));
+    1
+}
+
+/// Программа графической оболочки: `DISP_GUI_BIN`, рядом с самой `disp`, в `PATH`.
+fn gui_program(board: &Board) -> Option<PathBuf> {
+    if let Some(path) = board.settings.get("DISP_GUI_BIN") {
+        return Some(PathBuf::from(path));
+    }
+    let beside = env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("disp-gui")))
+        .filter(|path| path.is_file());
+    beside.or_else(|| which("disp-gui"))
+}
+
+/// Программа term-everything: `DISP_TERM_EVERYTHING` или `term-everything` в `PATH`.
+fn term_everything(board: &Board) -> Option<PathBuf> {
+    match board.settings.get("DISP_TERM_EVERYTHING") {
+        Some(path) => Some(PathBuf::from(path)).filter(|path| path.is_file()),
+        None => which("term-everything"),
+    }
+}
+
+/// Размер места под окно в панели терминала, в пикселях: панель без одной строки,
+/// которую term-everything занимает своей строкой состояния. `None`, если вывод идёт
+/// не в терминал или терминал не сообщает размер в пикселях. `DISP_GUI_SIZE=ШxВ`
+/// задаёт размер явно.
+fn pane_pixels() -> Option<(u32, u32)> {
+    if let Some(given) = env_nonempty("DISP_GUI_SIZE") {
+        let (width, height) = given.split_once('x')?;
+        return Some((width.parse().ok()?, height.parse().ok()?));
+    }
+    if !io::stdout().is_terminal() {
+        return None;
+    }
+    let size = ratatui::crossterm::terminal::window_size().ok()?;
+    if size.width == 0 || size.height == 0 || size.rows < 2 {
+        return None;
+    }
+    let row = size.height / size.rows;
+    Some((u32::from(size.width), u32::from(size.height - row)))
+}
+
 /// `disp unlabel`: снять подписи диспетчера со всех панелей zellij.
 pub fn unlabel() -> u8 {
     let board = Board::load();
@@ -579,6 +665,8 @@ pub fn usage() -> String {
                      a — принять, g — перейти к агенту, t — лента времени,
                      ? — все клавиши
   disp watch --plain [сек]   таблица без управления, обновляется раз в N секунд
+  disp gui           графическая оболочка: в панели терминала через term-everything,
+                     с ключом --window — обычным окном на рабочем столе
   disp show <id>     подробности: промпт, последний ответ, подзадачи
   disp ok <id|задача>...   принять результат (строка уходит из списка)
   disp ok --ended    принять все закрытые сессии; --done: все законченные

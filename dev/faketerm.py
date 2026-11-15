@@ -74,7 +74,15 @@ def main() -> int:
                 if quiet == b"0" and final and (b"i" in keys or keys.get(b"a") == b"q"):
                     os.write(fd, b"\x1b_Gi=%s;OK\x1b\\" % keys.get(b"i", b"0"))
             pending = pending[consumed:]
+    # Клиент zellij на SIGTERM отвечает не всегда: закрываем терминал и, если он
+    # за секунду не вышел, убиваем.
+    os.close(fd)
     os.kill(pid, 15)
+    for _ in range(10):
+        if os.waitpid(pid, os.WNOHANG)[0]:
+            return 0
+        time.sleep(0.1)
+    os.kill(pid, 9)
     os.waitpid(pid, 0)
     return 0
 
