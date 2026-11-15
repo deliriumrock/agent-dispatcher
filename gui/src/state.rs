@@ -210,11 +210,13 @@ impl State {
         self.rows.get(self.selected)
     }
 
+    /// Показывает сообщение в нижней полосе. Срок отсчитывается от текущего времени:
+    /// строки в простое перечитываются раз в минуту, и их время может отставать.
     fn notify(&mut self, text: impl Into<String>, error: bool) {
         self.notice = Some(Notice {
             text: text.into(),
             error,
-            until: self.now + NOTICE_SEC,
+            until: config::now() + NOTICE_SEC,
         });
     }
 
@@ -738,6 +740,20 @@ mod tests {
         assert_eq!(state.stamp(119).1, 119);
         assert_eq!(coarse_age(59), "<1м");
         assert_eq!(coarse_age(61), "1м");
+    }
+
+    #[test]
+    fn notice_lives_from_now_even_when_rows_are_old() {
+        let mut state = state();
+        // Строки перечитаны давно: их время на минуту позади.
+        state.now = config::now() - 60;
+        state.notify("эта сессия не в zellij: vscode", true);
+        let until = state.notice.as_ref().map_or(0, |notice| notice.until);
+        assert!(until >= config::now() + NOTICE_SEC - 1);
+        // Перечитанные строки с тем же отставанием сообщение не стирают.
+        let rows = std::mem::take(&mut state.rows);
+        state.set_rows(rows, config::now() - 60);
+        assert!(state.notice.is_some());
     }
 
     #[test]
