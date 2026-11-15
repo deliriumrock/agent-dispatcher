@@ -12,7 +12,6 @@ use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
-use std::process::Command as Process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
@@ -24,10 +23,9 @@ use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 use self::app::{App, Command, Mode};
 use self::gfx::{CellSize, Gfx};
-use crate::board::{self, Accepted, Board, Row, or_question};
+use crate::board::{self, Accepted, Board, Row};
 use crate::cli;
-use crate::config::{self, Paths, Settings, env_nonempty};
-use crate::detect::run_with_timeout;
+use crate::config::{self, Paths, Settings};
 use crate::error::Result;
 use crate::panes;
 use crate::store;
@@ -215,11 +213,21 @@ fn execute(command: Command, app: &mut App, paths: &Paths) {
             app.mode = Mode::Journal { scroll: 0 };
         }
         Command::Focus => {
-            let outcome = app.selected_row().map(focus);
+            let outcome = app.selected_row().map(|row| panes::focus(&row.session));
             match outcome {
                 Some(Ok(text)) => app.notify(text, false),
                 Some(Err(text)) => app.notify(text, true),
                 None => {}
+            }
+        }
+        Command::Approve => {
+            // Нажатие уходит в панель агента: решаем по только что перечитанной записи.
+            let Some((_board, _lock, row)) = fresh(app) else {
+                return;
+            };
+            match panes::approve(&row.session) {
+                Ok(text) => app.notify(text, false),
+                Err(text) => app.notify(text, true),
             }
         }
         Command::Accept { force } => {
@@ -227,7 +235,7 @@ fn execute(command: Command, app: &mut App, paths: &Paths) {
                 return;
             };
             match board::accept(&mut row, board.now, force) {
-                Ok(Accepted::Yes) => app.notify(format!("принято: {}", row.summary()), false),
+                Ok(Accepted::Yes) => app.notify(format!("убрано: {}", row.summary()), false),
                 // Пока мы смотрели на экран, сессия снова заработала: спрашиваем.
                 Ok(Accepted::StillActive) => app.mode = Mode::Confirm,
                 Err(err) => app.notify(format!("не записано: {err}"), true),
@@ -275,34 +283,5 @@ fn fresh(app: &mut App) -> Option<(Board, Option<File>, Row)> {
             app.notify("этой сессии уже нет в списке", true);
             None
         }
-    }
-}
-
-/// Переводит фокус zellij в панель, где идёт сессия. Возвращает текст для нижней строки.
-fn focus(row: &Row) -> std::result::Result<String, String> {
-    let s = &row.session;
-    if s.ended {
-        return Err("сессия закрыта: её панели уже нет".to_string());
-    }
-    let Some((session, pane)) = panes::target(&s.place) else {
-        return Err(format!("эта сессия не в zellij: {}", or_question(&s.place)));
-    };
-    let here = env_nonempty("ZELLIJ_SESSION_NAME");
-    let same_session = here.as_deref() == Some(session);
-    let mut command = Process::new("zellij");
-    if !same_session {
-        // Про несуществующую сессию zellij сообщает текстом, а код возврата оставляет нулевым.
-        let sessions = run_with_timeout(Process::new("zellij").args(["list-sessions", "-n", "-s"]));
-        let exists = sessions.is_some_and(|list| list.lines().any(|name| name.trim() == session));
-        if !exists {
-            return Err(format!("сессии zellij «{session}» сейчас нет"));
-        }
-        command.args(["--session", session]);
-    }
-    command.args(["action", "focus-pane-id", &format!("terminal_{pane}")]);
-    match run_with_timeout(&mut command) {
-        Some(_) if same_session => Ok(format!("фокус: {}", s.place)),
-        Some(_) => Ok(format!("выбрана в другой сессии zellij: {session}")),
-        None => Err(format!("в сессии «{session}» нет панели {pane}")),
     }
 }

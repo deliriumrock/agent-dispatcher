@@ -4,6 +4,7 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::board::{self, Counts, Row, Sort};
+use crate::model::View;
 use crate::store::JournalEvent;
 use crate::timeline::{History, Segment, Window};
 
@@ -43,7 +44,7 @@ pub enum Mode {
         /// Набранный текст.
         input: String,
     },
-    /// Вопрос, принять ли сессию, которая ещё работает.
+    /// Вопрос, убрать ли из списка сессию, которая ещё работает или ждёт.
     Confirm,
     /// Журнал смен статуса.
     Journal {
@@ -59,12 +60,14 @@ pub enum Mode {
 pub enum Command {
     /// Выйти.
     Quit,
-    /// Принять результат выбранной сессии.
+    /// Ответить агенту выбранной сессии вариантом по умолчанию: нажать Enter в его панели.
+    Approve,
+    /// Убрать выбранную сессию из списка: результат посмотрен.
     Accept {
-        /// Принять, даже если сессия ещё работает.
+        /// Убрать, даже если сессия ещё работает.
         force: bool,
     },
-    /// Вернуть принятую сессию в список.
+    /// Вернуть убранную сессию в список.
     Unaccept,
     /// Дать выбранной строке название.
     Rename(String),
@@ -207,7 +210,7 @@ impl App {
                 if matches!(key.code, KeyCode::Char('y' | 'Y' | 'н' | 'Н' | 'д' | 'Д')) {
                     return Some(Command::Accept { force: true });
                 }
-                self.notify("не принято", false);
+                self.notify("не убрано", false);
                 None
             }
             Mode::Journal { scroll } => {
@@ -237,7 +240,8 @@ impl App {
             KeyCode::Home => self.select(0),
             KeyCode::End => self.select(usize::MAX),
             KeyCode::Enter | KeyCode::Char('d') => self.details = !self.details,
-            KeyCode::Char('a' | ' ') => return self.accept_key(),
+            KeyCode::Char('a') => return self.approve_key(),
+            KeyCode::Char('x') => return self.accept_key(),
             KeyCode::Char('u') => {
                 let accepted = self.selected_row().is_some_and(|row| row.session.accepted);
                 return accepted.then_some(Command::Unaccept);
@@ -278,7 +282,17 @@ impl App {
         None
     }
 
-    /// Клавиша приёмки: принятую строку возвращает, про работающую сначала спрашивает.
+    /// Клавиша ответа агенту: только для строки, где агент ждёт человека.
+    fn approve_key(&mut self) -> Option<Command> {
+        let row = self.selected_row()?;
+        if row.view != View::Wait {
+            self.notify("агент сейчас ничего не спрашивает", true);
+            return None;
+        }
+        Some(Command::Approve)
+    }
+
+    /// Клавиша «убрать»: убранную строку возвращает, про работающую сначала спрашивает.
     fn accept_key(&mut self) -> Option<Command> {
         let row = self.selected_row()?;
         if row.session.accepted {
@@ -375,6 +389,7 @@ fn latin(ch: char) -> char {
     match ch {
         'й' | 'Й' => 'q',
         'ф' => 'a',
+        'ч' | 'Ч' => 'x',
         'Ф' => 'A',
         'п' | 'П' => 'g',
         'т' | 'Т' => 'n',
@@ -484,7 +499,7 @@ pub mod tests {
     }
 
     #[test]
-    fn finished_session_is_accepted_at_once() {
+    fn finished_session_is_removed_at_once() {
         let mut app = app();
         // Готовая сессия — последняя в списке.
         press(&mut app, KeyCode::End);
@@ -493,30 +508,49 @@ pub mod tests {
             Some("done")
         );
         assert_eq!(
-            press(&mut app, KeyCode::Char('a')),
+            press(&mut app, KeyCode::Char('x')),
             Some(Command::Accept { force: false })
         );
         assert_eq!(app.mode, Mode::Board);
         // Русская раскладка: та же клавиша.
         assert_eq!(
-            press(&mut app, KeyCode::Char('ф')),
+            press(&mut app, KeyCode::Char('ч')),
             Some(Command::Accept { force: false })
         );
+        // Пробел больше ничего не делает: случайно не ответить и не убрать.
+        assert_eq!(press(&mut app, KeyCode::Char(' ')), None);
+    }
+
+    #[test]
+    fn waiting_agent_gets_the_default_answer() {
+        let mut app = app();
+        // Первая строка — ждущая: `a` отвечает агенту.
+        assert_eq!(press(&mut app, KeyCode::Char('a')), Some(Command::Approve));
+        assert_eq!(press(&mut app, KeyCode::Char('ф')), Some(Command::Approve));
+        // У работающей и готовой отвечать нечего.
+        press(&mut app, KeyCode::Down);
+        assert_eq!(press(&mut app, KeyCode::Char('a')), None);
+        assert_eq!(
+            app.notice.as_ref().map(|notice| notice.text.as_str()),
+            Some("агент сейчас ничего не спрашивает")
+        );
+        press(&mut app, KeyCode::End);
+        assert_eq!(press(&mut app, KeyCode::Char('a')), None);
     }
 
     #[test]
     fn active_session_needs_confirmation() {
         let mut app = app();
-        assert_eq!(press(&mut app, KeyCode::Char('a')), None);
+        assert_eq!(press(&mut app, KeyCode::Char('x')), None);
         assert_eq!(app.mode, Mode::Confirm);
         assert_eq!(press(&mut app, KeyCode::Char('n')), None);
         assert_eq!(app.mode, Mode::Board);
         assert_eq!(
             app.notice.as_ref().map(|notice| notice.text.as_str()),
-            Some("не принято")
+            Some("не убрано")
         );
 
-        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Char('x'));
         assert_eq!(app.mode, Mode::Confirm);
         assert_eq!(
             press(&mut app, KeyCode::Char('y')),
@@ -526,11 +560,11 @@ pub mod tests {
     }
 
     #[test]
-    fn accepted_row_goes_back_to_the_list() {
+    fn removed_row_goes_back_to_the_list() {
         let mut app = app();
         app.rows[1].session.accepted = true;
         press(&mut app, KeyCode::Down);
-        assert_eq!(press(&mut app, KeyCode::Char('a')), Some(Command::Unaccept));
+        assert_eq!(press(&mut app, KeyCode::Char('x')), Some(Command::Unaccept));
         assert_eq!(press(&mut app, KeyCode::Char('u')), Some(Command::Unaccept));
         press(&mut app, KeyCode::Up);
         assert_eq!(press(&mut app, KeyCode::Char('u')), None);

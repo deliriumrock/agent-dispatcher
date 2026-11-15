@@ -10,9 +10,9 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use crate::config::Settings;
+use crate::config::{Settings, env_nonempty};
 use crate::detect::run_with_timeout;
-use crate::model::Session;
+use crate::model::{Session, Status};
 use crate::notify;
 use crate::text::clip;
 
@@ -107,6 +107,66 @@ pub fn clear_all(zellij: &str) -> usize {
         clear(&format!("zellij:{zellij}#{pane}"), true);
     }
     labelled.len()
+}
+
+/// Команда `zellij action` для сессии zellij, где идёт сессия агента, и номер её панели.
+/// `Err` — с текстом для человека, почему до панели не добраться.
+fn pane_action(session: &Session) -> Result<(Command, &str, &str), String> {
+    if session.ended {
+        return Err("сессия закрыта: её панели уже нет".to_string());
+    }
+    let Some((zellij, pane)) = target(&session.place) else {
+        let place = if session.place.is_empty() {
+            "?"
+        } else {
+            &session.place
+        };
+        return Err(format!("эта сессия не в zellij: {place}"));
+    };
+    let here = env_nonempty("ZELLIJ_SESSION_NAME");
+    let mut command = Command::new("zellij");
+    if here.as_deref() != Some(zellij) {
+        // Про несуществующую сессию zellij сообщает текстом, а код возврата оставляет нулевым.
+        let sessions = run_with_timeout(Command::new("zellij").args(["list-sessions", "-n", "-s"]));
+        let exists = sessions.is_some_and(|list| list.lines().any(|name| name.trim() == zellij));
+        if !exists {
+            return Err(format!("сессии zellij «{zellij}» сейчас нет"));
+        }
+        command.args(["--session", zellij]);
+    }
+    command.arg("action");
+    Ok((command, zellij, pane))
+}
+
+/// Переводит фокус zellij в панель, где идёт сессия. Возвращает сообщение для человека:
+/// `Ok` — что сделано, `Err` — почему перейти нельзя.
+pub fn focus(session: &Session) -> Result<String, String> {
+    let (mut command, zellij, pane) = pane_action(session)?;
+    command.args(["focus-pane-id", &format!("terminal_{pane}")]);
+    let same_session = env_nonempty("ZELLIJ_SESSION_NAME").as_deref() == Some(zellij);
+    match run_with_timeout(&mut command) {
+        Some(_) if same_session => Ok(format!("фокус: {}", session.place)),
+        Some(_) => Ok(format!("выбрана в другой сессии zellij: {zellij}")),
+        None => Err(format!("в сессии «{zellij}» нет панели {pane}")),
+    }
+}
+
+/// Отвечает агенту вариантом по умолчанию: нажимает Enter в его панели zellij.
+///
+/// Когда агент спрашивает разрешение, у Claude Code и Codex подсвечен первый вариант,
+/// «да», и Enter выбирает его. Нажимать можно только пока агент ждёт: иначе Enter ушёл бы
+/// в поле ввода и отправил то, что там набрано. Поэтому вызывающий передаёт только что
+/// перечитанную запись сессии.
+pub fn approve(session: &Session) -> Result<String, String> {
+    if session.status != Status::Waiting || session.ended {
+        return Err("агент сейчас ничего не спрашивает".to_string());
+    }
+    let (mut command, _zellij, pane) = pane_action(session)?;
+    command.args(["write", "-p", &format!("terminal_{pane}"), "13"]);
+    match run_with_timeout(&mut command) {
+        Some(_) => Ok(format!("ответ по умолчанию отправлен: {}", session.place)),
+        None => Err(format!("не удалось нажать Enter в панели {pane}")),
+    }
 }
 
 /// Команда `zellij --session <сессия> action`.
