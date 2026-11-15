@@ -10,8 +10,10 @@ mod view;
 
 use std::fs::File;
 use std::io::{self, IsTerminal, Write};
+use std::process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::{Duration, SystemTime};
 
 use chrono::Local;
@@ -32,6 +34,11 @@ use crate::timeline::History;
 
 /// Как часто панель проверяет клавиши и файлы сессий.
 const POLL: Duration = Duration::from_millis(200);
+/// Сколько ждать, пока панель сама выйдет по сигналу или после пропажи терминала,
+/// прежде чем завершить процесс.
+const EXIT_GRACE: Duration = Duration::from_secs(1);
+/// Как часто проверять, что терминал ещё есть.
+const TERMINAL_CHECK: Duration = Duration::from_secs(2);
 /// Сколько последних записей журнала показывает панель.
 const JOURNAL_LINES: usize = 500;
 /// Сколько последних записей журнала идёт в ленты времени.
@@ -60,9 +67,13 @@ pub fn watch(args: &[String]) -> u8 {
 /// Занимает терминал, крутит цикл панели и возвращает терминал в прежний вид.
 fn run() -> Result<()> {
     // SIGTERM и SIGHUP: выходим через общий путь, чтобы терминал был восстановлен.
+    // Но если терминал пропал, главный поток может застрять в чтении клавиш: crossterm
+    // на конце потока и на EIO читает по кругу и к проверке флага не возвращается,
+    // занимая ядро целиком. Поэтому через секунду процесс завершается сам.
     let stop = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&stop);
-    let _ = ctrlc::set_handler(move || flag.store(true, Ordering::Relaxed));
+    let _ = ctrlc::set_handler(move || stop_then_exit(&flag));
+    watch_terminal(Arc::clone(&stop));
 
     // О поддержке картинок терминал нужно спросить до того, как начнётся чтение клавиш.
     enable_raw_mode()?;
@@ -80,6 +91,33 @@ fn run() -> Result<()> {
     }
     ratatui::restore();
     outcome
+}
+
+/// Просит цикл панели остановиться, а если он не успел за `EXIT_GRACE`, завершает процесс.
+/// Выход из `run` завершает процесс раньше, и до `process::exit` дело не доходит.
+fn stop_then_exit(stop: &AtomicBool) {
+    stop.store(true, Ordering::Relaxed);
+    thread::sleep(EXIT_GRACE);
+    process::exit(1);
+}
+
+/// Сторож терминала: когда терминал закрыли, а сигнал до панели не дошёл (она не в
+/// переднем плане своего терминала), панель всё равно завершается. У пропавшего
+/// терминала `isatty` ложно: ядро отвечает на запросы к нему ошибкой EIO.
+fn watch_terminal(stop: Arc<AtomicBool>) {
+    let spawned = thread::Builder::new()
+        .name("disp-tty".to_string())
+        .spawn(move || {
+            loop {
+                thread::sleep(TERMINAL_CHECK);
+                if !io::stdin().is_terminal() {
+                    stop_then_exit(&stop);
+                }
+            }
+        });
+    if let Err(err) = spawned {
+        warn(&format!("disp watch: сторож терминала не запущен: {err}"));
+    }
 }
 
 /// Решает, рисовать ли ленты картинками. `DISP_GFX=0` выключает картинки, `DISP_GFX=1`

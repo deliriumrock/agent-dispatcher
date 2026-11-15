@@ -141,10 +141,20 @@ pub fn watch_plain(pause: Duration) -> u8 {
     loop {
         let board = Board::load();
         let table = table(&board, term_cols(), false, true);
-        emit(&format!(
+        let frame = format!(
             "\x1b[H\x1b[2J{}  disp {VERSION}\n\n{table}\n",
             Local::now().format("%H:%M:%S")
-        ));
+        );
+        let mut out = io::stdout().lock();
+        if out
+            .write_all(frame.as_bytes())
+            .and_then(|()| out.flush())
+            .is_err()
+        {
+            // Вывод закрыт: терминал пропал или читатель трубы вышел. Показывать некому.
+            return 0;
+        }
+        drop(out);
         thread::sleep(pause);
     }
 }
