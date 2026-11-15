@@ -4,7 +4,7 @@
 //! поэтому правила отбора, сортировки и приёмки записаны один раз.
 
 use std::cmp::Ordering;
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
 use crate::config::{self, Paths, Settings};
@@ -13,6 +13,7 @@ use crate::error::Result;
 use crate::model::{Session, Status, View};
 use crate::panes;
 use crate::store::{self, JournalEvent, Store};
+use crate::text::{age, dur, home_relative, local_time, unmarked};
 
 /// Сколько секунд простаивающая сессия остаётся в таблице.
 const IDLE_VISIBLE_SEC: i64 = 43_200;
@@ -85,6 +86,25 @@ impl Row {
         out
     }
 
+    /// Колонка «ЧТО» для панели, с пометкой о приёмке. У сессии без названия показывается
+    /// последний промпт, а если и его нет — начало последнего ответа.
+    pub fn headline(&self) -> String {
+        let s = &self.session;
+        let filled = |text: &Option<String>| text.clone().filter(|text| !text.is_empty());
+        let mut what = self.what();
+        if s.title.is_empty() {
+            let fallback = filled(&s.last_prompt).or_else(|| {
+                filled(&s.last_reply).map(|reply| format!("ответ: {}", unmarked(&reply)))
+            });
+            what.push_str(&fallback.unwrap_or_default());
+        }
+        if s.accepted {
+            format!("[принято] {what}")
+        } else {
+            what
+        }
+    }
+
     /// Строка для сообщений о приёмке: задача, агент и название.
     pub fn summary(&self) -> String {
         let s = &self.session;
@@ -101,6 +121,114 @@ impl Row {
         let s = &self.session;
         matches!(s.status, Status::Working | Status::Waiting) && !s.ended
     }
+}
+
+/// Место без слова `zellij:`: в узкой колонке важны сессия и номер панели.
+pub fn short_place(place: &str) -> &str {
+    place.strip_prefix("zellij:").unwrap_or(place)
+}
+
+/// Чем выделить поле подробностей сессии.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    /// Обычный текст.
+    Plain,
+    /// Цветом статуса сессии.
+    Status,
+    /// Приглушённо: служебное или уже сделанное.
+    Muted,
+}
+
+/// Поле подробностей сессии: название и значение.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Detail {
+    /// Название поля; пусто у продолжения предыдущего (строки подзадач).
+    pub key: &'static str,
+    /// Значение.
+    pub value: String,
+    /// Как выделить значение.
+    pub tone: Tone,
+}
+
+/// Подробности сессии для показа: статус, название, промпт, ответ, каталоги, времена,
+/// подзадачи. Пустые поля пропущены.
+pub fn details(row: &Row, now: i64) -> Vec<Detail> {
+    let s = &row.session;
+    let mut out = Vec::new();
+    let mut field = |key: &'static str, value: String, tone: Tone| {
+        if !value.is_empty() {
+            out.push(Detail { key, value, tone });
+        }
+    };
+
+    let mut status = row.view.label().to_string();
+    if !s.detail.is_empty() {
+        status.push_str(&format!(" · {}", s.detail));
+    }
+    if s.ended {
+        status.push_str(" · сессия закрыта");
+        if let Some(reason) = s.end_reason.as_deref().filter(|reason| !reason.is_empty()) {
+            status.push_str(&format!(" ({reason})"));
+        }
+    }
+    if s.accepted {
+        status.push_str(" · принято");
+    }
+    field("статус", status, Tone::Status);
+    field("что", s.title.clone(), Tone::Plain);
+    if let Some(prompt) = s.last_prompt.as_deref().filter(|text| *text != s.title) {
+        field("промпт", prompt.to_string(), Tone::Plain);
+    }
+    if let Some(reply) = s.last_reply.as_deref() {
+        field("ответ", reply.to_string(), Tone::Plain);
+    }
+    field("где", or_question(&s.place).to_string(), Tone::Plain);
+    // «Каталог» — тот, по которому названа задача: проект, над которым агент работает,
+    // а если отдельного проекта нет — каталог запуска. Остальное показываем, когда отличается.
+    let root = s.root.as_deref().unwrap_or(&s.cwd);
+    let home = s.project.as_deref().unwrap_or(root);
+    field("каталог", home_relative(home), Tone::Plain);
+    if home != root {
+        field("запущен в", home_relative(root), Tone::Plain);
+    }
+    if s.cwd != home && s.cwd != root {
+        field("сейчас в", home_relative(&s.cwd), Tone::Plain);
+    }
+
+    let mut times = vec![
+        format!("начата {}", local_time(s.started, "%d.%m %H:%M")),
+        format!("событие {} назад", age(now - s.updated)),
+    ];
+    match (s.turn_started, s.done_at) {
+        (Some(from), _) if s.status == Status::Working => {
+            times.push(format!("ход идёт {}", dur(now - from)));
+        }
+        (Some(from), Some(to)) if to >= from => times.push(format!("ход занял {}", dur(to - from))),
+        _ => {}
+    }
+    field("время", times.join(" · "), Tone::Plain);
+
+    let mut extra = Vec::new();
+    if s.subagents > 0 {
+        extra.push(format!("субагентов в работе: {}", s.subagents));
+    }
+    if s.bg > 0 {
+        extra.push(format!("фоновых задач: {}", s.bg));
+    }
+    field("ещё", extra.join(" · "), Tone::Plain);
+    field("сессия", s.session_id.clone(), Tone::Muted);
+    if !s.subtasks.is_empty() {
+        field("подзадачи", row.subtasks(), Tone::Plain);
+        for task in s.subtasks.values() {
+            let (mark, tone) = if task.d {
+                ("[x]", Tone::Muted)
+            } else {
+                ("[ ]", Tone::Plain)
+            };
+            field("", format!("{mark} {}", task.s), tone);
+        }
+    }
+    out
 }
 
 /// Текст или знак вопроса, если текста нет.
@@ -274,6 +402,15 @@ impl Board {
     /// Готовит одну сессию к показу.
     pub fn row(&self, path: PathBuf, session: Session) -> Row {
         Row::new(path, session, self.now, self.stale_min())
+    }
+
+    /// Сессия из файла `path`, заново прочитанная под блокировкой хранилища: между показом
+    /// и действием человека файл мог изменить хук. Блокировка держится, пока жив первый
+    /// элемент результата. `None`, если файла уже нет.
+    pub fn fresh(&self, path: &Path) -> Option<(Option<File>, Row)> {
+        let lock = self.store.lock();
+        let session = store::read_session(path)?;
+        Some((lock, self.row(path.to_path_buf(), session)))
     }
 
     /// Все сессии в порядке имён файлов.

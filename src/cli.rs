@@ -17,7 +17,7 @@ use crate::detect::{self, which};
 use crate::model::Status;
 use crate::panes;
 use crate::store;
-use crate::text::{age, clip, emit, pad, warn};
+use crate::text::{age, clip, emit, local_time, pad, warn};
 
 /// Суммарная ширина всех колонок таблицы, кроме последней («ЧТО»).
 const FIXED_COLUMNS: usize = 81;
@@ -457,13 +457,6 @@ pub fn log(args: &[String]) -> u8 {
     }
     emit(&out);
     0
-}
-
-/// Местное время в заданном формате; пусто, если метка времени некорректна.
-pub fn local_time(ts: i64, format: &str) -> String {
-    DateTime::from_timestamp(ts, 0)
-        .map(|time| time.with_timezone(&Local).format(format).to_string())
-        .unwrap_or_default()
 }
 
 /// `disp gc [дней]`: удалить принятые и пустые записи старше N дней, укоротить журнал.

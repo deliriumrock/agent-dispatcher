@@ -5,6 +5,13 @@ edition = "2024"
 description = "Диспетчер сессий AI-агентов: Claude Code, Codex CLI, Gemini CLI"
 publish = false
 
+# Графическая оболочка — отдельный пакет: её тяжёлые зависимости не должны попадать
+# в `disp`, который хуки агентов запускают на каждое событие. `cargo build` в корне
+# собирает только `disp`; оболочка собирается как `cargo build -p disp-gui`.
+[workspace]
+members = [".", "gui"]
+default-members = ["."]
+
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 ctrlc = { version = "3", features = ["termination"] }

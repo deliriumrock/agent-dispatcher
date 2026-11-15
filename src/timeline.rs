@@ -235,6 +235,15 @@ fn session_points(row: &Row) -> Vec<(i64, Option<Phase>)> {
     points
 }
 
+/// Длина окна ленты словами: `30м`, `3ч`, `24ч`.
+pub fn span_label(span: i64) -> String {
+    if span < 3_600 {
+        format!("{}м", span / 60)
+    } else {
+        format!("{}ч", span / 3_600)
+    }
+}
+
 /// Самое важное состояние в каждом из `slots` делений ленты. Так лента рисуется
 /// символами: одно деление — одно знакоместо.
 pub fn slots(lane: &[Segment], window: Window, slots: usize) -> Vec<Option<Phase>> {

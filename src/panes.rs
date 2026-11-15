@@ -10,7 +10,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use crate::config::Settings;
+use crate::config::{Settings, env_nonempty};
 use crate::detect::run_with_timeout;
 use crate::model::Session;
 use crate::notify;
@@ -107,6 +107,40 @@ pub fn clear_all(zellij: &str) -> usize {
         clear(&format!("zellij:{zellij}#{pane}"), true);
     }
     labelled.len()
+}
+
+/// Переводит фокус zellij в панель, где идёт сессия. Возвращает сообщение для человека:
+/// `Ok` — что сделано, `Err` — почему перейти нельзя.
+pub fn focus(session: &Session) -> Result<String, String> {
+    if session.ended {
+        return Err("сессия закрыта: её панели уже нет".to_string());
+    }
+    let Some((zellij, pane)) = target(&session.place) else {
+        let place = if session.place.is_empty() {
+            "?"
+        } else {
+            &session.place
+        };
+        return Err(format!("эта сессия не в zellij: {place}"));
+    };
+    let here = env_nonempty("ZELLIJ_SESSION_NAME");
+    let same_session = here.as_deref() == Some(zellij);
+    let mut command = Command::new("zellij");
+    if !same_session {
+        // Про несуществующую сессию zellij сообщает текстом, а код возврата оставляет нулевым.
+        let sessions = run_with_timeout(Command::new("zellij").args(["list-sessions", "-n", "-s"]));
+        let exists = sessions.is_some_and(|list| list.lines().any(|name| name.trim() == zellij));
+        if !exists {
+            return Err(format!("сессии zellij «{zellij}» сейчас нет"));
+        }
+        command.args(["--session", zellij]);
+    }
+    command.args(["action", "focus-pane-id", &format!("terminal_{pane}")]);
+    match run_with_timeout(&mut command) {
+        Some(_) if same_session => Ok(format!("фокус: {}", session.place)),
+        Some(_) => Ok(format!("выбрана в другой сессии zellij: {zellij}")),
+        None => Err(format!("в сессии «{zellij}» нет панели {pane}")),
+    }
 }
 
 /// Команда `zellij --session <сессия> action`.

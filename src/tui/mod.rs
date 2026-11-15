@@ -8,11 +8,8 @@ mod app;
 mod gfx;
 mod view;
 
-use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, IsTerminal, Write};
-use std::path::Path;
-use std::process::Command as Process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
@@ -24,13 +21,12 @@ use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 use self::app::{App, Command, Mode};
 use self::gfx::{CellSize, Gfx};
-use crate::board::{self, Accepted, Board, Row, or_question};
+use crate::board::{self, Accepted, Board, Row};
 use crate::cli;
-use crate::config::{self, Paths, Settings, env_nonempty};
-use crate::detect::run_with_timeout;
+use crate::config::{self, Paths, Settings};
 use crate::error::Result;
 use crate::panes;
-use crate::store;
+use crate::store::{self, Signature};
 use crate::text::warn;
 use crate::timeline::History;
 
@@ -40,9 +36,6 @@ const POLL: Duration = Duration::from_millis(200);
 const JOURNAL_LINES: usize = 500;
 /// Сколько последних записей журнала идёт в ленты времени.
 const HISTORY_LINES: usize = 20_000;
-
-/// Отпечаток каталога сессий: имена файлов, время изменения и размер.
-type Signature = Vec<(OsString, Option<SystemTime>, u64)>;
 
 /// `disp watch [--plain] [сек]`: живая панель. Без терминала или с `--plain` —
 /// простая таблица, которая перерисовывается раз в `сек` секунд.
@@ -129,7 +122,7 @@ fn event_loop(
     let mut reload = true;
     let mut redraw = true;
     while !stop.load(Ordering::Relaxed) {
-        let stamp = (signature(&paths.sessions), config::now());
+        let stamp = (store::dir_signature(&paths.sessions), config::now());
         if reload || seen.as_ref() != Some(&stamp) {
             let board = Board::load();
             app.set_rows(board.visible(app.show_all), board.now);
@@ -137,7 +130,7 @@ fn event_loop(
             reload = false;
             redraw = true;
             // Журнал для лент перечитывается, только когда он изменился.
-            let journal = file_stamp(&paths.events());
+            let journal = store::file_stamp(&paths.events());
             if app.timeline && history_seen != Some(journal) {
                 app.history = History::from_events(&board::journal(&paths, HISTORY_LINES));
                 history_seen = Some(journal);
@@ -182,30 +175,6 @@ fn event_loop(
     Ok(())
 }
 
-/// Время изменения и размер файла; `None`, если файла нет.
-fn file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
-    let meta = fs::metadata(path).ok()?;
-    Some((meta.modified().ok()?, meta.len()))
-}
-
-/// Отпечаток каталога сессий. Файлы сессий заменяются целиком, поэтому любое событие
-/// агента меняет время изменения файла.
-fn signature(dir: &Path) -> Signature {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut files: Signature = entries
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
-        .filter_map(|entry| {
-            let meta = entry.metadata().ok()?;
-            Some((entry.file_name(), meta.modified().ok(), meta.len()))
-        })
-        .collect();
-    files.sort();
-    files
-}
-
 /// Выполняет действие над выбранной строкой и сообщает результат в нижней строке.
 fn execute(command: Command, app: &mut App, paths: &Paths) {
     match command {
@@ -215,7 +184,7 @@ fn execute(command: Command, app: &mut App, paths: &Paths) {
             app.mode = Mode::Journal { scroll: 0 };
         }
         Command::Focus => {
-            let outcome = app.selected_row().map(focus);
+            let outcome = app.selected_row().map(|row| panes::focus(&row.session));
             match outcome {
                 Some(Ok(text)) => app.notify(text, false),
                 Some(Err(text)) => app.notify(text, true),
@@ -259,50 +228,16 @@ fn execute(command: Command, app: &mut App, paths: &Paths) {
     }
 }
 
-/// Выбранная строка, заново прочитанная с диска под блокировкой хранилища: между
-/// отрисовкой и клавишей файл мог изменить хук. Блокировка держится, пока жив второй
-/// элемент результата.
+/// Выбранная строка, заново прочитанная с диска под блокировкой хранилища. Блокировка
+/// держится, пока жив второй элемент результата.
 fn fresh(app: &mut App) -> Option<(Board, Option<File>, Row)> {
     let path = app.selected_row()?.path.clone();
     let board = Board::load();
-    let lock = board.store.lock();
-    match store::read_session(&path) {
-        Some(session) => {
-            let row = board.row(path, session);
-            Some((board, lock, row))
-        }
+    match board.fresh(&path) {
+        Some((lock, row)) => Some((board, lock, row)),
         None => {
             app.notify("этой сессии уже нет в списке", true);
             None
         }
-    }
-}
-
-/// Переводит фокус zellij в панель, где идёт сессия. Возвращает текст для нижней строки.
-fn focus(row: &Row) -> std::result::Result<String, String> {
-    let s = &row.session;
-    if s.ended {
-        return Err("сессия закрыта: её панели уже нет".to_string());
-    }
-    let Some((session, pane)) = panes::target(&s.place) else {
-        return Err(format!("эта сессия не в zellij: {}", or_question(&s.place)));
-    };
-    let here = env_nonempty("ZELLIJ_SESSION_NAME");
-    let same_session = here.as_deref() == Some(session);
-    let mut command = Process::new("zellij");
-    if !same_session {
-        // Про несуществующую сессию zellij сообщает текстом, а код возврата оставляет нулевым.
-        let sessions = run_with_timeout(Process::new("zellij").args(["list-sessions", "-n", "-s"]));
-        let exists = sessions.is_some_and(|list| list.lines().any(|name| name.trim() == session));
-        if !exists {
-            return Err(format!("сессии zellij «{session}» сейчас нет"));
-        }
-        command.args(["--session", session]);
-    }
-    command.args(["action", "focus-pane-id", &format!("terminal_{pane}")]);
-    match run_with_timeout(&mut command) {
-        Some(_) if same_session => Ok(format!("фокус: {}", s.place)),
-        Some(_) => Ok(format!("выбрана в другой сессии zellij: {session}")),
-        None => Err(format!("в сессии «{session}» нет панели {pane}")),
     }
 }

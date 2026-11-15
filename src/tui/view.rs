@@ -12,12 +12,10 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::app::{App, LaneBox, Mode};
 use crate::VERSION;
-use crate::board::{Row, Sort, SortKey, or_question, status_name};
-use crate::cli::local_time;
-use crate::config::env_nonempty;
+use crate::board::{self, Row, Sort, SortKey, Tone, or_question, short_place, status_name};
 use crate::model::{Status, View};
-use crate::text::{age, clip_cells, dur, fit, width, wrap};
-use crate::timeline::{self, Phase, Segment, Window};
+use crate::text::{age, clip_cells, fit, local_time, width, wrap};
+use crate::timeline::{self, Phase, Segment, Window, span_label};
 
 /// Меньше этого панель не рисуется.
 const MIN_WIDTH: u16 = 24;
@@ -375,35 +373,6 @@ impl Shape {
     }
 }
 
-/// Место без слова `zellij:`: в узкой колонке важны сессия и номер панели.
-fn short_place(place: &str) -> &str {
-    place.strip_prefix("zellij:").unwrap_or(place)
-}
-
-/// Колонка «ЧТО» с пометкой о приёмке. У сессии без названия показывается
-/// последний промпт, а если и его нет — начало последнего ответа.
-fn what(row: &Row) -> String {
-    let s = &row.session;
-    let filled = |text: &Option<String>| text.clone().filter(|text| !text.is_empty());
-    let mut what = row.what();
-    if s.title.is_empty() {
-        let fallback = filled(&s.last_prompt)
-            .or_else(|| filled(&s.last_reply).map(|reply| format!("ответ: {}", unmarked(&reply))));
-        what.push_str(&fallback.unwrap_or_default());
-    }
-    if s.accepted {
-        format!("[принято] {what}")
-    } else {
-        what
-    }
-}
-
-/// Текст без разметки Markdown: в одной строке таблицы звёздочки и решётки только мешают.
-fn unmarked(text: &str) -> String {
-    let cleaned: String = text.chars().filter(|ch| !matches!(ch, '*' | '`')).collect();
-    cleaned.trim_start_matches(['#', ' ']).to_string()
-}
-
 /// Строка таблицы или её заголовок: значения колонок в порядке показа.
 fn table_line(columns: Columns, values: [&str; 8]) -> String {
     let [id, status, agent, task, subtasks, place, age, what] = values;
@@ -435,7 +404,7 @@ fn row_lines(shape: Shape, row: &Row, now: i64, cells: usize, lane: bool) -> Vec
     let age = age(now - s.updated);
     let agent = or_question(&s.agent);
     // Когда показана лента, она занимает место названия.
-    let what = if lane { String::new() } else { what(row) };
+    let what = if lane { String::new() } else { row.headline() };
     match shape {
         Shape::Table(columns) => {
             let place = if columns.short_place {
@@ -538,15 +507,6 @@ impl LaneFrame {
             }
         }
         cells.into_iter().collect()
-    }
-}
-
-/// Длина окна ленты словами: `30м`, `3ч`, `24ч`.
-fn span_label(span: i64) -> String {
-    if span < 3_600 {
-        format!("{}м", span / 60)
-    } else {
-        format!("{}ч", span / 3_600)
     }
 }
 
@@ -739,102 +699,23 @@ fn draw_list(frame: &mut Frame, full: Rect, app: &mut App) {
 
 /// Строки подробностей выбранной сессии, уже разбитые по ширине.
 fn detail_lines(row: &Row, now: i64, cells: usize) -> Vec<Line<'static>> {
-    let s = &row.session;
     let value_cells = cells.saturating_sub(DETAIL_KEY).max(8);
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut field = |key: &str, value: &str, style: Style| {
-        for (index, part) in wrap(value, value_cells).into_iter().enumerate() {
-            let key = if index == 0 { key } else { "" };
+    for detail in board::details(row, now) {
+        let style = match detail.tone {
+            Tone::Plain => Style::new(),
+            Tone::Status => view_style(row.view),
+            Tone::Muted => dim(),
+        };
+        for (index, part) in wrap(&detail.value, value_cells).into_iter().enumerate() {
+            let key = if index == 0 { detail.key } else { "" };
             lines.push(Line::from(vec![
                 Span::styled(fit(key, DETAIL_KEY), dim()),
                 Span::styled(part, style),
             ]));
         }
-    };
-    let plain = Style::new();
-
-    let mut status = row.view.label().to_string();
-    if !s.detail.is_empty() {
-        status.push_str(&format!(" · {}", s.detail));
-    }
-    if s.ended {
-        status.push_str(" · сессия закрыта");
-        if let Some(reason) = s.end_reason.as_deref().filter(|reason| !reason.is_empty()) {
-            status.push_str(&format!(" ({reason})"));
-        }
-    }
-    if s.accepted {
-        status.push_str(" · принято");
-    }
-    field("статус", &status, view_style(row.view));
-    field("что", &s.title, plain);
-    if let Some(prompt) = s.last_prompt.as_deref().filter(|text| *text != s.title) {
-        field("промпт", prompt, plain);
-    }
-    if let Some(reply) = s.last_reply.as_deref() {
-        field("ответ", reply, plain);
-    }
-    field("где", or_question(&s.place), plain);
-    // «Каталог» — тот, по которому названа задача: проект, над которым агент работает,
-    // а если отдельного проекта нет — каталог запуска. Остальное показываем, когда отличается.
-    let root = s.root.as_deref().unwrap_or(&s.cwd);
-    let home = s.project.as_deref().unwrap_or(root);
-    field("каталог", &home_relative(home), plain);
-    if home != root {
-        field("запущен в", &home_relative(root), plain);
-    }
-    if s.cwd != home && s.cwd != root {
-        field("сейчас в", &home_relative(&s.cwd), plain);
-    }
-
-    let mut times = vec![
-        format!("начата {}", local_time(s.started, "%d.%m %H:%M")),
-        format!("событие {} назад", age(now - s.updated)),
-    ];
-    match (s.turn_started, s.done_at) {
-        (Some(from), _) if s.status == Status::Working => {
-            times.push(format!("ход идёт {}", dur(now - from)));
-        }
-        (Some(from), Some(to)) if to >= from => times.push(format!("ход занял {}", dur(to - from))),
-        _ => {}
-    }
-    field("время", &times.join(" · "), plain);
-
-    let mut extra = Vec::new();
-    if s.subagents > 0 {
-        extra.push(format!("субагентов в работе: {}", s.subagents));
-    }
-    if s.bg > 0 {
-        extra.push(format!("фоновых задач: {}", s.bg));
-    }
-    if !extra.is_empty() {
-        field("ещё", &extra.join(" · "), plain);
-    }
-    field("сессия", &s.session_id, dim());
-    if !s.subtasks.is_empty() {
-        field("подзадачи", &row.subtasks(), plain);
-        for task in s.subtasks.values() {
-            let (mark, style) = if task.d {
-                ("[x]", dim())
-            } else {
-                ("[ ]", plain)
-            };
-            field("", &format!("{mark} {}", task.s), style);
-        }
     }
     lines
-}
-
-/// Путь с `~` вместо домашнего каталога.
-fn home_relative(path: &str) -> String {
-    match env_nonempty("HOME") {
-        Some(home) if path == home => "~".to_string(),
-        Some(home) => match path.strip_prefix(&format!("{home}/")) {
-            Some(rest) => format!("~/{rest}"),
-            None => path.to_string(),
-        },
-        None => path.to_string(),
-    }
 }
 
 /// Подробности выбранной сессии под списком.
@@ -1538,12 +1419,12 @@ mod tests {
         let mut row = row("claude", "site-31", Status::Done, 900);
         row.session.title.clear();
         row.session.last_reply = Some("## **Готово:** цены `обновлены`".to_string());
-        assert_eq!(what(&row), "ответ: Готово: цены обновлены");
+        assert_eq!(row.headline(), "ответ: Готово: цены обновлены");
         row.session.last_prompt = Some("Поправь цены".to_string());
-        assert_eq!(what(&row), "Поправь цены");
+        assert_eq!(row.headline(), "Поправь цены");
         row.session.detail = "ход прерван".to_string();
         row.session.accepted = true;
-        assert_eq!(what(&row), "[принято] ход прерван · Поправь цены");
+        assert_eq!(row.headline(), "[принято] ход прерван · Поправь цены");
     }
 
     /// Панель с включённой лентой: получасовое окно и журнал трёх сессий.

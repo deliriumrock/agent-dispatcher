@@ -1,0 +1,16 @@
+[package]
+name = "disp-gui"
+version = "0.1.0"
+edition = "2024"
+description = "Графическая оболочка диспетчера сессий AI-агентов"
+publish = false
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+disp = { path = ".." }
+# Только программный рендерер: окно должно рисоваться без видеокарты, иначе его
+# не покажет term-everything в панели терминала.
+slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software"] }
+
+[build-dependencies]
+slint-build = "1.18"
