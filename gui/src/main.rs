@@ -28,7 +28,7 @@ fn main() -> ExitCode {
             "disp-gui {} — графическая оболочка диспетчера сессий\n\n  \
              disp-gui               открыть окно\n  \
              disp-gui --size ШxВ    окно заданного размера в пикселях\n",
-            env!("CARGO_PKG_VERSION")
+            disp::VERSION
         );
         return ExitCode::SUCCESS;
     }

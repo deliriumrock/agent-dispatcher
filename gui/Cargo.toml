@@ -1,6 +1,6 @@
 [package]
 name = "disp-gui"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 description = "Графическая оболочка диспетчера сессий AI-агентов"
 publish = false

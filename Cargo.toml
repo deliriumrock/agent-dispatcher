@@ -1,6 +1,6 @@
 [package]
 name = "disp"
-version = "0.8.0"
+version.workspace = true
 edition = "2024"
 description = "Диспетчер сессий AI-агентов: Claude Code, Codex CLI, Gemini CLI"
 publish = false
@@ -11,6 +11,12 @@ publish = false
 [workspace]
 members = [".", "gui"]
 default-members = ["."]
+
+# Версия общая для `disp` и `disp-gui`.
+[workspace.package]
+# Третья цифра — номер сборки, показывается тремя знаками: 0.8.1 — это «0.8.001».
+# Повышается командой `make bump` перед каждой сборкой, которая уходит в работу.
+version = "0.8.2"
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

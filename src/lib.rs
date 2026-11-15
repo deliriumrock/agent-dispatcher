@@ -25,5 +25,7 @@ pub mod text;
 pub mod timeline;
 pub mod tui;
 
-/// Версия программы.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Версия программы в виде `0.8.001`: третья цифра — номер сборки, всегда тремя
+/// знаками. Собирается в `build.rs` из версии в `Cargo.toml`; у `disp` и
+/// `disp-gui` она общая.
+pub const VERSION: &str = env!("DISP_VERSION");
