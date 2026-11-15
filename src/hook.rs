@@ -16,9 +16,10 @@ use serde_json::{Map, Value};
 use crate::config::{self, Paths, Settings};
 use crate::detect;
 use crate::error::Result;
-use crate::model::{Session, Status, Subtask, task_label};
+use crate::model::{AgentProcess, Session, Status, Subtask, task_label};
 use crate::notify::{self, Note};
 use crate::panes;
+use crate::procs;
 use crate::store::{self, JournalEvent, Store};
 use crate::text::{clip, dur, oneline, value_text};
 
@@ -115,6 +116,8 @@ pub struct Context {
     pub auto_ok_on_exit: bool,
     /// Название, которое агент сам дал сессии.
     pub agent_title: Option<String>,
+    /// Процесс агента, если его удалось узнать на этом событии.
+    pub process: Option<AgentProcess>,
 }
 
 /// Итог обработки события.
@@ -156,6 +159,9 @@ pub fn step(
         s.branch = ctx.branch.clone();
     }
     s.place = ctx.place.clone();
+    if ctx.process.is_some() {
+        s.process = ctx.process;
+    }
     if s.started == 0 {
         s.started = ctx.now;
     }
@@ -517,6 +523,12 @@ fn handle(store: &Store, agent_arg: &str, event_arg: &str, raw: &[u8]) -> Result
         detect::agent_title(&agent, &sid, &transcript, true, &dir, &place, &settings)
     };
 
+    // Процесс агента запоминается, чтобы потом, если сессия замолчит, проверить, жив ли он.
+    let process = if agent == "claude" {
+        procs::claude_process(&sid)
+    } else {
+        None
+    };
     let ctx = Context {
         agent,
         sid,
@@ -531,6 +543,7 @@ fn handle(store: &Store, agent_arg: &str, event_arg: &str, raw: &[u8]) -> Result
         notify_min_sec: settings.int("DISP_NOTIFY_MIN_SEC", 120),
         auto_ok_on_exit: settings.get("DISP_AUTO_OK_ON_EXIT") == Some("1"),
         agent_title,
+        process,
     };
 
     let lock = store.lock();

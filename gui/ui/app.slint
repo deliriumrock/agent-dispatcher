@@ -9,7 +9,7 @@ import { LineEdit } from "std-widgets.slint";
 export struct Segment {
     start: float,
     width: float,
-    // 0 — простой, 1 — готово, 2 — тихо, 3 — работает, 4 — сбой, 5 — ждёт.
+    // 0 — простой, 1 — готово, 2 — молчит, 3 — работает, 4 — сбой, 5 — ждёт.
     phase: int,
 }
 
@@ -22,7 +22,8 @@ export struct Tick {
 // Строка списка: одна сессия агента.
 export struct SessionRow {
     sid: string,
-    // 0 — ждёт, 1 — сбой, 2 — прервана, 3 — работает, 4 — тихо, 5 — простой, 6 — готово.
+    // 0 — ждёт, 1 — сбой, 2 — прервана, 3 — завис, 4 — работает, 5 — молчит, 6 — простой,
+    // 7 — готово.
     kind: int,
     status: string,
     agent: string,
@@ -75,13 +76,13 @@ export global Theme {
         if (kind == 1 || kind == 2) {
             return self.failed;
         }
-        if (kind == 3) {
-            return self.working;
-        }
-        if (kind == 4) {
+        if (kind == 3 || kind == 5) {
             return self.quiet;
         }
-        if (kind == 5) {
+        if (kind == 4) {
+            return self.working;
+        }
+        if (kind == 6) {
             return self.idle;
         }
         return self.done;
@@ -193,8 +194,8 @@ component SessionItem inherits Rectangle {
     callback clicked();
     callback activated();
 
-    // Строка, которая требует человека, подсвечена своим цветом.
-    property <bool> alarm: (root.session.kind <= 2) && !root.session.accepted;
+    // Строка, которая требует человека (ждёт, сбой, прервана, завис), подсвечена своим цветом.
+    property <bool> alarm: (root.session.kind <= 3) && !root.session.accepted;
     property <color> accent: Theme.status(root.session.kind);
 
     height: 52px;
@@ -325,7 +326,7 @@ export component AppWindow inherits Window {
     in property <bool> show-all;
     in property <bool> details-open;
     in property <int> selected: 0;
-    in property <int> selected-kind: 5;
+    in property <int> selected-kind: 6;
     in property <string> selected-title;
     // Сообщение о действии, вопрос о приёмке, ввод названия.
     in property <string> notice;
@@ -417,7 +418,7 @@ export component AppWindow inherits Window {
                         }
 
                         Badge {
-                            label: "тихо";
+                            label: "молчат";
                             count: root.silent;
                             accent: Theme.quiet;
                         }

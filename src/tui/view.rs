@@ -120,18 +120,20 @@ fn view_style(view: View) -> Style {
         View::Wait => Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         View::Err | View::Lost => Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
         View::Done => Style::new().fg(Color::Green),
+        View::Stuck => Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD),
         View::Quiet => Style::new().fg(Color::Magenta),
         View::Work => Style::new().fg(Color::Cyan),
         View::Idle => dim(),
     }
 }
 
-/// Заливка строки, которая требует человека: ждущая — жёлтая, сбой и обрыв — красная.
-/// Такую строку видно при любой сортировке.
+/// Заливка строки, которая требует человека: ждущая — жёлтая, сбой и обрыв — красная,
+/// зависшая — сиреневая. Такую строку видно при любой сортировке.
 fn alarm_style(view: View) -> Option<Style> {
     match view {
         View::Wait => Some(Style::new().fg(Color::Black).bg(Color::Yellow)),
         View::Err | View::Lost => Some(Style::new().fg(Color::White).bg(Color::Red)),
+        View::Stuck => Some(Style::new().fg(Color::White).bg(Color::Magenta)),
         _ => None,
     }
 }
@@ -174,7 +176,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, clock: &str) {
         gap(),
         part(counts.working, "работают", "●", View::Work),
         gap(),
-        part(counts.quiet, "тихо", "?", View::Quiet),
+        part(counts.quiet, "молчат", "?", View::Quiet),
     ]);
     if app.show_all {
         spans.push(gap());
@@ -1119,8 +1121,8 @@ mod tests {
         assert_eq!(
             lines[0],
             format!(
-                " ждут тебя: 1  готово: 1 · работают: 1 · тихо: 0{}18:06:12  disp {VERSION}",
-                " ".repeat(110 - 48 - 15 - VERSION.len() - 1)
+                " ждут тебя: 1  готово: 1 · работают: 1 · молчат: 0{}18:06:12  disp {VERSION}",
+                " ".repeat(110 - 50 - 15 - VERSION.len() - 1)
             )
         );
         // Слева поле с отметкой выбранной строки; у колонки сортировки стрелка.
@@ -1155,8 +1157,8 @@ mod tests {
         assert_eq!(
             lines[0],
             format!(
-                " ждут тебя: 1  готово: 1 · работают: 1 · тихо: 0{}18:06:12  disp {VERSION}",
-                " ".repeat(80 - 48 - 15 - VERSION.len() - 1)
+                " ждут тебя: 1  готово: 1 · работают: 1 · молчат: 0{}18:06:12  disp {VERSION}",
+                " ".repeat(80 - 50 - 15 - VERSION.len() - 1)
             )
         );
         assert_eq!(
@@ -1207,7 +1209,11 @@ mod tests {
             lines[5]
         );
         let lines = screen(&mut app, 40, 6);
-        assert!(lines[5].starts_with(" Enter подробности ? справка"), "{}", lines[5]);
+        assert!(
+            lines[5].starts_with(" Enter подробности ? справка"),
+            "{}",
+            lines[5]
+        );
     }
 
     #[test]
@@ -1281,7 +1287,7 @@ mod tests {
         assert_eq!(buffer[(1, 0)].fg, BAR_MUTED);
         let top: String = (0..80).map(|x| buffer[(x, 0)].symbol()).collect();
         assert!(
-            top.starts_with(" ждут тебя: 0 · готово: 1 · работают: 2 · тихо: 0"),
+            top.starts_with(" ждут тебя: 0 · готово: 1 · работают: 2 · молчат: 0"),
             "{top}"
         );
 

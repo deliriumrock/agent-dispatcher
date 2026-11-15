@@ -12,11 +12,28 @@ use crate::detect;
 use crate::error::Result;
 use crate::model::{Session, Status, View};
 use crate::panes;
+use crate::procs::{self, Activity};
 use crate::store::{self, JournalEvent, Store};
 use crate::text::{age, dur, home_relative, local_time, unmarked};
 
 /// Сколько секунд простаивающая сессия остаётся в таблице.
 const IDLE_VISIBLE_SEC: i64 = 43_200;
+
+/// Уточняет молчащие строки по процессам агентов. `/proc` смотрится, только если
+/// такие строки есть.
+fn settle_quiet(rows: &mut [Row], now: i64) {
+    let quiet: Vec<usize> = (0..rows.len())
+        .filter(|index| rows[*index].view == View::Quiet)
+        .collect();
+    if quiet.is_empty() {
+        return;
+    }
+    let sessions: Vec<&Session> = quiet.iter().map(|index| &rows[*index].session).collect();
+    let activities = procs::activities(&sessions, now);
+    for (index, activity) in quiet.into_iter().zip(activities) {
+        rows[index].settle(&activity, now);
+    }
+}
 
 /// Сессия вместе с тем, что вычисляется для показа.
 #[derive(Clone, Debug)]
@@ -29,6 +46,8 @@ pub struct Row {
     pub sid: String,
     /// Вид на доске.
     pub view: View,
+    /// Что показала проверка процессов молчащей сессии: идущая команда или закрытый агент.
+    pub note: Option<String>,
 }
 
 impl Row {
@@ -41,6 +60,27 @@ impl Row {
             session,
             sid,
             view,
+            note: None,
+        }
+    }
+
+    /// Уточняет вид молчащей сессии по её процессам (`procs::Activity`): идёт команда —
+    /// сессия работает, агента нет — прервана, агент жив без команд — завис.
+    pub fn settle(&mut self, activity: &Activity, now: i64) {
+        if self.view != View::Quiet {
+            return;
+        }
+        match activity {
+            Activity::Command { text, since } => {
+                self.view = View::Work;
+                self.note = Some(format!("команда {}: {text}", age(now - since)));
+            }
+            Activity::Gone => {
+                self.view = View::Lost;
+                self.note = Some("агент закрыт".to_string());
+            }
+            Activity::Stuck => self.view = View::Stuck,
+            Activity::Unknown => {}
         }
     }
 
@@ -61,10 +101,15 @@ impl Row {
     /// Колонка «ЧТО»: уточнение к статусу и название.
     pub fn what(&self) -> String {
         let s = &self.session;
-        if s.detail.is_empty() {
+        let detail = [self.note.as_deref().unwrap_or_default(), s.detail.as_str()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        if detail.is_empty() {
             s.title.clone()
         } else {
-            format!("{} · {}", s.detail, s.title)
+            format!("{detail} · {}", s.title)
         }
     }
 
@@ -117,9 +162,10 @@ impl Row {
     }
 
     /// Идёт ли в сессии работа: такую нельзя убрать из списка без явного подтверждения.
+    /// Сессия, агента которой больше нет (проверка процессов), не работает.
     pub fn is_active(&self) -> bool {
         let s = &self.session;
-        matches!(s.status, Status::Working | Status::Waiting) && !s.ended
+        matches!(s.status, Status::Working | Status::Waiting) && !s.ended && self.view != View::Lost
     }
 }
 
@@ -339,13 +385,13 @@ fn place_key(row: &Row) -> (u8, String, u64, String) {
 /// Сводка по строкам доски для верхней строки.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counts {
-    /// Требуют человека: ждут, сбой, прерваны.
+    /// Требуют человека: ждут, сбой, прерваны, зависли.
     pub attention: usize,
     /// Закончены, но ещё не убраны из списка.
     pub done: usize,
     /// Работают.
     pub working: usize,
-    /// Числятся работающими, но давно молчат.
+    /// Числятся работающими, давно молчат, и проверить, что с ними, нельзя.
     pub quiet: usize,
 }
 
@@ -355,7 +401,7 @@ impl Counts {
         let views: Vec<View> = rows.into_iter().map(|row| row.view).collect();
         let count = |wanted: &[View]| views.iter().filter(|view| wanted.contains(view)).count();
         Counts {
-            attention: count(&[View::Wait, View::Err, View::Lost]),
+            attention: count(&[View::Wait, View::Err, View::Lost, View::Stuck]),
             done: count(&[View::Done]),
             working: count(&[View::Work]),
             quiet: count(&[View::Quiet]),
@@ -365,7 +411,7 @@ impl Counts {
     /// Сводка одной строкой.
     pub fn line(&self) -> String {
         format!(
-            "ждут тебя: {} · готово: {} · работают: {} · тихо: {}",
+            "ждут тебя: {} · готово: {} · работают: {} · молчат: {}",
             self.attention, self.done, self.working, self.quiet
         )
     }
@@ -394,7 +440,7 @@ impl Board {
         }
     }
 
-    /// Через сколько минут молчания работающая сессия считается «тихой».
+    /// Через сколько минут молчания работающая сессия считается молчащей.
     pub fn stale_min(&self) -> i64 {
         self.settings.int("DISP_STALE_MIN", 30)
     }
@@ -410,16 +456,21 @@ impl Board {
     pub fn fresh(&self, path: &Path) -> Option<(Option<File>, Row)> {
         let lock = self.store.lock();
         let session = store::read_session(path)?;
-        Some((lock, self.row(path.to_path_buf(), session)))
+        let mut row = self.row(path.to_path_buf(), session);
+        settle_quiet(std::slice::from_mut(&mut row), self.now);
+        Some((lock, row))
     }
 
-    /// Все сессии в порядке имён файлов.
+    /// Все сессии в порядке имён файлов; молчащие уточнены по процессам.
     pub fn rows(&self) -> Vec<Row> {
-        self.store
+        let mut rows: Vec<Row> = self
+            .store
             .all()
             .into_iter()
             .map(|(path, session)| self.row(path, session))
-            .collect()
+            .collect();
+        settle_quiet(&mut rows, self.now);
+        rows
     }
 
     /// Строки доски, отсортированные по статусу: сверху то, что требует человека,
@@ -747,6 +798,62 @@ mod tests {
     }
 
     #[test]
+    fn quiet_row_is_settled_by_its_processes() {
+        // Работала и замолчала 40 минут назад.
+        let quiet = || {
+            let mut row = row(Status::Working, false);
+            row.session.updated = 1000;
+            Row::new(row.path, row.session, 1000 + 40 * 60, 30)
+        };
+        let now = 1000 + 40 * 60;
+        assert_eq!(quiet().view, View::Quiet);
+
+        let mut command = quiet();
+        command.settle(
+            &Activity::Command {
+                text: "cargo test".to_string(),
+                since: now - 42 * 60,
+            },
+            now,
+        );
+        assert_eq!(command.view, View::Work);
+        assert_eq!(
+            command.what(),
+            "команда 42м: cargo test · Починить импорт цен"
+        );
+        assert!(command.is_active());
+
+        let mut gone = quiet();
+        gone.settle(&Activity::Gone, now);
+        assert_eq!(gone.view, View::Lost);
+        assert_eq!(gone.what(), "агент закрыт · Починить импорт цен");
+        assert!(
+            !gone.is_active(),
+            "строку закрытого агента убирают без подтверждения"
+        );
+
+        let mut stuck = quiet();
+        stuck.settle(&Activity::Stuck, now);
+        assert_eq!(stuck.view, View::Stuck);
+        assert_eq!(stuck.view.label(), "? завис");
+
+        let mut unknown = quiet();
+        unknown.settle(&Activity::Unknown, now);
+        assert_eq!(unknown.view.label(), "? молчит");
+
+        let counts = Counts::of([&command, &gone, &stuck, &unknown]);
+        assert_eq!(
+            counts.line(),
+            "ждут тебя: 2 · готово: 0 · работают: 1 · молчат: 1"
+        );
+
+        // Проверка не трогает строки, которые не молчат.
+        let mut working = row(Status::Working, false);
+        working.settle(&Activity::Gone, now);
+        assert_eq!(working.view, View::Work);
+    }
+
+    #[test]
     fn counts_group_views() {
         let rows = vec![
             row(Status::Waiting, false),
@@ -767,7 +874,7 @@ mod tests {
         );
         assert_eq!(
             counts.line(),
-            "ждут тебя: 3 · готово: 1 · работают: 1 · тихо: 0"
+            "ждут тебя: 3 · готово: 1 · работают: 1 · молчат: 0"
         );
     }
 }

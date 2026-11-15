@@ -169,7 +169,8 @@ impl History {
             }
         }
         // Молчание в журнал не попадает: о нём известно только по времени последнего события.
-        if row.view == View::Quiet
+        // Сессия, у которой нашлась идущая команда, не молчит, а работает.
+        if matches!(row.view, View::Quiet | View::Stuck)
             && let Some(last) = lane.last_mut()
             && last.phase == Phase::Working
             && s.updated > last.from

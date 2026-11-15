@@ -16,7 +16,7 @@ default-members = ["."]
 [workspace.package]
 # Третья цифра — номер сборки, показывается тремя знаками: 0.8.1 — это «0.8.001».
 # Повышается командой `make bump` перед каждой сборкой, которая уходит в работу.
-version = "0.8.3"
+version = "0.8.4"
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
@@ -24,7 +24,7 @@ ctrlc = { version = "3", features = ["termination"] }
 indexmap = { version = "2", features = ["serde"] }
 miniz_oxide = "0.8"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
-rustix = { version = "1", features = ["event"] }
+rustix = { version = "1", features = ["event", "param"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 terminal_size = "0.4"

@@ -58,9 +58,12 @@ pub enum View {
     Err,
     /// Сессию закрыли посреди работы.
     Lost,
+    /// Числится работающей и давно молчит, а по процессам видно: агент жив, но команды
+    /// у него не идут.
+    Stuck,
     /// Идёт ход.
     Work,
-    /// Числится работающей, но давно молчит.
+    /// Числится работающей и давно молчит, а проверить, что с агентом, нельзя.
     Quiet,
     /// Заданий не было.
     Idle,
@@ -75,6 +78,7 @@ impl View {
             View::Wait => "wait",
             View::Err => "err",
             View::Lost => "lost",
+            View::Stuck => "stuck",
             View::Done => "done",
             View::Quiet => "quiet",
             View::Work => "work",
@@ -89,7 +93,8 @@ impl View {
             View::Err => "x СБОЙ",
             View::Lost => "x ПРЕРВАНА",
             View::Done => "✓ ГОТОВО",
-            View::Quiet => "? тихо",
+            View::Stuck => "? завис",
+            View::Quiet => "? молчит",
             View::Work => "● работает",
             View::Idle => "○ простой",
         }
@@ -101,11 +106,22 @@ impl View {
             View::Wait => "1;33",
             View::Err | View::Lost => "1;31",
             View::Done => "32",
+            View::Stuck => "1;35",
             View::Quiet => "35",
             View::Work => "36",
             View::Idle => "2",
         }
     }
+}
+
+/// Процесс агента: номер и время запуска. Номера процессов переиспользуются, поэтому
+/// процесс считается тем же, только если совпало и время запуска.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentProcess {
+    /// Номер процесса.
+    pub pid: u32,
+    /// Время запуска в тиках с загрузки системы: поле 22 `/proc/<pid>/stat`.
+    pub start: u64,
 }
 
 /// Подзадача сессии (у Claude Code — события TaskCreated и TaskCompleted).
@@ -199,6 +215,10 @@ pub struct Session {
     /// Сколько фоновых задач осталось после остановки хода.
     #[serde(default, deserialize_with = "nullable")]
     pub bg: i64,
+    /// Процесс агента, если хук смог его узнать: по нему видно, жив ли агент, когда
+    /// сессия давно молчит.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<AgentProcess>,
     /// Поля, которых эта версия не знает.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -216,7 +236,8 @@ impl Session {
     }
 
     /// Вид на доске в момент `now`; `stale_min` — через сколько минут молчания
-    /// работающая сессия считается «тихой».
+    /// работающая сессия считается молчащей. Что с ней на самом деле, уточняет
+    /// проверка процессов (`crate::procs`).
     pub fn view(&self, now: i64, stale_min: i64) -> View {
         match self.status {
             Status::Waiting => View::Wait,

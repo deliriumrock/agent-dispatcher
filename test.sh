@@ -131,7 +131,7 @@ tbl="$("$DISP" ls)"
 echo "$tbl" | sed 's/^/     | /'
 check "строки не шире терминала" "0" "$(echo "$tbl" | jq -R --argjson w "$COLUMNS" 'select(length > $w)' | wc -l)"
 check "при узкой панели тоже" "0" "$(COLUMNS=96 "$DISP" ls | jq -R 'select(length > 96)' | wc -l)"
-has "сводка" "ждут тебя: 1 · готово: 3 · работают: 0 · тихо: 0" "$tbl"
+has "сводка" "ждут тебя: 1 · готово: 3 · работают: 0 · молчат: 0" "$tbl"
 check "первой идёт ждущая сессия" "0c0de1" "$(echo "$tbl" | sed -n 3p | awk '{print $1}')"
 has "короткие ID различают сессии с общим префиксом UUIDv7" "0c0de2" "$tbl"
 has "подзадачи и фон в таблице" "1/3 ф1" "$tbl"
@@ -173,9 +173,9 @@ ev claude "{\"session_id\":\"$CA\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"
 check "свой инструмент после Stop (автопродолжение): снова working" "working" "$(field "claude-$CA" .status)"
 export DISP_NOW=2530
 
-echo "== 7. «Тихо», прерванные, show, name"
+echo "== 7. Молчащие, прерванные, show, name"
 export DISP_NOW=$((2530 + 31 * 60))
-has "working без событий 31 мин = тихо" "? тихо" "$("$DISP" ls | grep 00a1b2)"
+has "working без событий 31 мин, процесс агента неизвестен = молчит" "? молчит" "$("$DISP" ls | grep 00a1b2)"
 ev claude "{\"session_id\":\"$CA\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"SessionEnd\",\"reason\":\"other\"}" "${Z[@]}"
 has "сессия закрыта посреди работы = ПРЕРВАНА" "x ПРЕРВАНА" "$("$DISP" ls | grep 00a1b2)"
 "$DISP" name 00a1b2 "macOS-билд Nebularix" >/dev/null
@@ -340,6 +340,28 @@ has "gc не трогает непринятые" "порог из файла" "
 has "doctor видит события агентов" "claude" "$("$DISP" doctor)"
 echo "     hook.log:"; sed 's/^/     | /' "$DISP_STATE_DIR/hook.log" 2>/dev/null
 check "в hook.log нет ошибок самого скрипта" "0" "$(grep -Ec 'unbound variable|syntax error|command not found|compile error' "$DISP_STATE_DIR/hook.log" 2>/dev/null | head -n 1)"
+
+echo "== 14. Молчащая сессия: что с процессом агента"
+# Хук Claude Code получает CLAUDE_PID и CLAUDE_CODE_SESSION_ID и запоминает процесс агента,
+# если номер сессии совпал. Процесс агента здесь изображает обычный sleep.
+export DISP_NOW=20000
+SP="cccccccc-3333-4333-8333-0000000057c4"
+sleep 300 &
+AGENT=$!
+ev claude "{\"session_id\":\"$SP\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Долгая проверка\"}" "${Z[@]}" CLAUDE_CODE_SESSION_ID="$SP" CLAUDE_PID="$AGENT"
+check "хук запомнил процесс агента своей сессии" "$AGENT" "$(field "claude-$SP" .process.pid)"
+ev claude "{\"session_id\":\"$SP\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Read\"}" "${Z[@]}" CLAUDE_CODE_SESSION_ID="other" CLAUDE_PID="1"
+check "хук из чужой сессии процесс не подменяет" "$AGENT" "$(field "claude-$SP" .process.pid)"
+export DISP_NOW=$((20000 + 31 * 60))
+has "молчит, агент жив, команд нет = завис" "? завис" "$("$DISP" ls | grep 0057c4)"
+check "завис в --json" "stuck" "$("$DISP" ls --json | jq -r '.[] | select(.sid == "0057c4") | .view')"
+kill "$AGENT"
+wait "$AGENT" 2>/dev/null
+row="$("$DISP" ls | grep 0057c4)"
+has "молчит, процесса агента нет = ПРЕРВАНА" "x ПРЕРВАНА" "$row"
+has "пометка о закрытом агенте" "агент закрыт" "$row"
+"$DISP" ok 0057c4 >/dev/null
+check "строку закрытого агента убирают без -f" "true" "$(field "claude-$SP" .accepted)"
 
 echo
 echo "итого: ok=$pass fail=$fail"

@@ -65,7 +65,7 @@ pub struct ViewData {
     pub details: ModelRc<DetailField>,
     /// Подсказки по клавишам.
     pub hints: ModelRc<Hint>,
-    /// Счётчики: ждут человека, готово, работают, тихо.
+    /// Счётчики: ждут человека, готово, работают, молчат.
     pub counts: [i32; 4],
     /// Время.
     pub clock: SharedString,
@@ -454,7 +454,7 @@ impl State {
             show_all: self.show_all,
             details_open: self.details,
             selected: count(self.selected),
-            selected_kind: selected.map_or(5, |row| kind(row.view)),
+            selected_kind: selected.map_or(kind(View::Idle), |row| kind(row.view)),
             selected_title: selected
                 .map(|row| {
                     format!(
@@ -538,10 +538,11 @@ fn kind(view: View) -> i32 {
         View::Wait => 0,
         View::Err => 1,
         View::Lost => 2,
-        View::Work => 3,
-        View::Quiet => 4,
-        View::Idle => 5,
-        View::Done => 6,
+        View::Stuck => 3,
+        View::Work => 4,
+        View::Quiet => 5,
+        View::Idle => 6,
+        View::Done => 7,
     }
 }
 
@@ -722,7 +723,7 @@ mod tests {
         let view = state.view(960.0);
         let rows: Vec<SessionRow> = view.rows.iter().collect();
         assert_eq!(rows.len(), 3);
-        assert_eq!((rows[0].kind, rows[1].kind, rows[2].kind), (0, 3, 6));
+        assert_eq!((rows[0].kind, rows[1].kind, rows[2].kind), (0, 4, 7));
         assert_eq!(rows[0].status.as_str(), "! ЖДЁТ");
         assert_eq!(rows[0].place.as_str(), "dev#3");
         assert_eq!(rows[0].age.as_str(), "1м");

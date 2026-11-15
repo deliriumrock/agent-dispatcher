@@ -15,11 +15,14 @@ pub mod cli;
 pub mod config;
 pub mod detect;
 pub mod error;
+#[cfg(test)]
+mod fakeproc;
 pub mod hook;
 pub mod install;
 pub mod model;
 pub mod notify;
 pub mod panes;
+pub mod procs;
 pub mod store;
 pub mod text;
 pub mod timeline;

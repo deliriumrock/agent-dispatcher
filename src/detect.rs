@@ -249,7 +249,7 @@ fn parent_pid(proc: &Path, pid: u32) -> Option<u32> {
 }
 
 /// Аргументы командной строки процесса.
-fn cmdline(proc: &Path, pid: u32) -> Vec<String> {
+pub(crate) fn cmdline(proc: &Path, pid: u32) -> Vec<String> {
     fs::read(proc.join(pid.to_string()).join("cmdline"))
         .map(|bytes| {
             bytes
@@ -262,7 +262,7 @@ fn cmdline(proc: &Path, pid: u32) -> Vec<String> {
 }
 
 /// Процесс Codex: сама программа или её обёртка на node (`node …/bin/codex`).
-fn is_codex(args: &[String]) -> bool {
+pub(crate) fn is_codex(args: &[String]) -> bool {
     args.iter().take(2).any(|arg| base_name(arg) == "codex")
 }
 
@@ -649,6 +649,7 @@ pub fn which(program: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fakeproc::FakeProc;
 
     #[test]
     fn base_name_matches_the_utility() {
@@ -792,36 +793,6 @@ mod tests {
         assert_eq!(find(Path::new("/tmp/scratch/x.rs"), None), None);
         assert_eq!(find(&root.join("../elsewhere/x.rs"), None), None);
         let _ = fs::remove_dir_all(&root);
-    }
-
-    /// Поддельный `/proc`: процессы с родителем, командной строкой, каталогом и окружением.
-    struct FakeProc {
-        root: PathBuf,
-    }
-
-    impl FakeProc {
-        fn new(name: &str) -> Self {
-            let root =
-                std::env::temp_dir().join(format!("disp-proc-{name}-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&root);
-            FakeProc { root }
-        }
-
-        fn add(&self, pid: u32, parent: u32, args: &[&str], cwd: &str, env: &[&str]) {
-            let dir = self.root.join(pid.to_string());
-            assert!(fs::create_dir_all(&dir).is_ok());
-            let stat = format!("{pid} (proc name) S {parent} 1 1 0");
-            assert!(fs::write(dir.join("stat"), stat).is_ok());
-            assert!(fs::write(dir.join("cmdline"), args.join("\0") + "\0").is_ok());
-            assert!(fs::write(dir.join("environ"), env.join("\0") + "\0").is_ok());
-            assert!(std::os::unix::fs::symlink(cwd, dir.join("cwd")).is_ok());
-        }
-    }
-
-    impl Drop for FakeProc {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.root);
-        }
     }
 
     #[test]
