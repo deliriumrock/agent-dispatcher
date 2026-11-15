@@ -1,0 +1,23 @@
+[package]
+name = "disp"
+version = "0.7.1"
+edition = "2024"
+description = "Диспетчер сессий AI-агентов: Claude Code, Codex CLI, Gemini CLI"
+publish = false
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+ctrlc = { version = "3", features = ["termination"] }
+indexmap = { version = "2", features = ["serde"] }
+miniz_oxide = "0.8"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+rustix = { version = "1", features = ["event"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+terminal_size = "0.4"
+unicode-width = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,1482 @@
+# Диспетчер сессий AI-агентов — v0
+
+Дата: 2026-11-14. Статус: скрипт установлен в `~/.local/bin/disp` и проходит 114 проверок на симулированных событиях. На живых Claude Code 2.1.325 и Codex CLI 0.168.0 проверен короткий цикл (SessionStart → UserPromptSubmit → PostToolUse → Stop → SessionEnd).
+
+## Что это решает
+
+Поводом стал забытый билд под macOS: задание выдано, результат никто не забрал. Доска со статусами от этого не спасает, на неё тоже надо смотреть. Спасают две вещи, и v0 построен вокруг них:
+
+1. **Агент сам зовёт тебя**, когда закончил длинный ход или упёрся в разрешение.
+2. **Ничто не уходит из списка без твоего явного «принято»**. Законченная сессия висит в таблице, пока ты не выполнишь `disp ok`.
+
+Живая таблица «что сейчас работает и где» идёт третьим пунктом.
+
+## Как устроено
+
+```
+Claude Code ─┐
+Codex CLI   ─┼─ хук ─> disp hook <агент> ─> один JSON-файл на сессию ─> disp watch (панель zellij)
+Gemini CLI  ─┘                                   │                  └─> уведомление (desktop, Telegram)
+                                                 └─> events.jsonl (журнал смен статуса)
+```
+
+- Единица учёта — **сессия**. У одного агента их может быть сколько угодно, над одной задачей могут работать сессии разных агентов.
+- **Задача** определяется автоматически: имя каталога git-репозитория (или worktree), в котором запущена сессия. Каталог запуска запоминается при первом событии сессии (поле `root`), и задача не меняется, когда агент уходит в подкаталог или во временный каталог. Claude Code передаёт каталог проекта хуку в `CLAUDE_PROJECT_DIR`; если переменной нет, он берётся из первой записи транскрипта. У остальных агентов это каталог первого события. В bash-версии 0.1.0 задача бралась из текущего каталога и плыла вслед за ним.
+
+  Если агент запущен в общем каталоге (не внутри git-репозитория), а работает в одном из подкаталогов, задача — этот подкаталог (поле `project`). Его выдаёт файл, который агент только что записал: Claude Code и Gemini CLI передают путь в данных инструмента записи, Codex — в тексте правки `apply_patch`. Проект — каталог на пути от каталога запуска к файлу, в котором есть признак проекта: сначала ищется репозиторий (`.git`), затем манифест (`Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `Makefile` и подобные); из нескольких берётся ближайший к каталогу запуска, так что вложенный пакет отдельным проектом не становится. Если признаков нет, проектом считается ближайший к файлу каталог, не считая служебных (`src`, `tests`, `docs` и подобных); такая догадка не перебивает уже известный проект, пока агент пишет внутри него. Пока агент ничего не записал, подсказкой служит его текущий каталог, если он внутри каталога запуска. Файлы вне каталога запуска (временные каталоги, настройки в домашнем каталоге) и файлы прямо в нём задачу не меняют; чтение и команды оболочки — тоже. Агент, запущенный внутри репозитория, остаётся одной задачей — этим репозиторием. Отсюда правило: одна задача — один worktree — одно имя (каталог, ветка, таб zellij, окно VSCode). Имя можно задать и вручную: `DISP_TASK=nbx-142 claude`.
+- **Где** — сессия zellij и номер панели (`zellij:dev#3`), либо `vscode`, либо имя терминала. Номер панели тот же, что в `zellij action ... --pane-id terminal_3`.
+- **Что** — краткое название, которое агент сам дал сессии. У Claude Code оно берётся из транскрипта (запись `ai-title`, после `/rename` — `custom-title`), у Codex — из его списка сессий `~/.codex/session_index.jsonl`, а если там названия нет — из заголовка панели zellij (он ставит туда «тема | проект»). Пока названия нет, показывается начало первого промпта. Название, заданное через `disp name`, агент не перетирает.
+- Скрипт один, `disp`, на bash + jq. Он же принимает события от хуков и рисует таблицу.
+
+### Статусы в таблице
+
+| На доске | Что значит | Что делать |
+|---|---|---|
+| `! ЖДЁТ` | Агент остановился и ждёт разрешения или ответа | Идти в панель из колонки ГДЕ |
+| `x СБОЙ` | Ход оборвался ошибкой (у Claude Code — событие StopFailure) | Смотреть `disp show <id>` |
+| `x ПРЕРВАНА` | Сессию закрыли посреди работы | Решить, перезапускать ли |
+| `✓ ГОТОВО` | Ход закончен, результат тобой не принят | `disp show <id>`, потом `disp ok <id>` |
+| `? тихо` | Числится работающей, но 30+ минут без событий | Длинная команда (сборка) или зависла: проверить |
+| `● работает` | Идёт ход | Ничего |
+| `○ простой` | Сессия открыта, заданий не было | Ничего |
+
+Сортировка по статусу: сверху то, что требует тебя (ждёт, сбой, прервана), затем работающие и тихие, затем простаивающие, в конце готовые; внутри группы — самое давнее. В bash-версии 0.1.0 готовые шли сразу за требующими тебя. В панели `disp watch` список можно отсортировать и по другим колонкам. Колонка ПОДЗ: `1/3` — подзадачи (только Claude Code), `а2` — активные субагенты, `ф1` — фоновые задачи, оставшиеся после остановки хода.
+
+Пример (вывод из тестового прогона):
+
+```
+ждут тебя: 1 · не принято: 3 · работают: 0 · тихо: 0
+ID     СТАТУС     АГЕНТ  ЗАДАЧА                 ПОДЗ    ГДЕ                ВОЗР ЧТО
+0c0de1 ! ЖДЁТ     codex  nbx-142                —       vscode             5м   разрешение: Bash · Проверь подпись и нотаризацию
+00a1b2 ✓ ГОТОВО   claude nbx-142                1/3 ф1  zellij:main#3      6м   Собери билд под macOS и подпиши его
+0c0de2 ✓ ГОТОВО   codex  site-31                —       zellij:main#7      2м   Поправь цены на странице
+siond4 ✓ ГОТОВО   gemini site-31                —       закрыта            1м   Сгенерируй варианты заголовка
+```
+
+## Установка
+
+Нужны `bash`, `jq`. Желательны `flock`, `git`, `notify-send`, `curl` (в Ubuntu всё, кроме jq, обычно уже стоит).
+
+### 1. Скрипт
+
+Вытащить скрипт из этого файла (приложение A) и положить в `~/.local/bin`:
+
+```bash
+mkdir -p ~/.local/bin
+awk '/^```bash title="disp"$/{f=1;next} /^```$/{f=0} f' dispatcher-v0.md > ~/.local/bin/disp
+chmod +x ~/.local/bin/disp
+disp doctor
+```
+
+`disp doctor` покажет, чего не хватает и от каких агентов уже приходили события.
+
+По желанию — прогнать тесты на своей машине (приложение B):
+
+```bash
+awk '/^```bash title="test.sh"$/{f=1;next} /^```$/{f=0} f' dispatcher-v0.md > /tmp/disp-test.sh
+bash /tmp/disp-test.sh ~/.local/bin/disp
+```
+
+### 2. Хуки Claude Code
+
+Проще всего одной командой:
+
+```bash
+disp install claude
+```
+
+Она добавляет в `~/.claude/settings.json` только недостающие записи, чужие хуки и остальные ключи не трогает, а прежний файл сохраняет рядом как `settings.json.bak-disp`. Повторный запуск ничего не меняет.
+
+То же вручную, с проверкой глазами. `disp config claude` печатает готовый блок с абсолютным путём к скрипту; его надо **добавить** к существующим хукам, а не заменить ими файл:
+
+```bash
+MERGE='.[0] as $a | .[1] as $b | $a + {hooks: (reduce ($b.hooks | to_entries[]) as $e (($a.hooks // {}); .[$e.key] = ((.[$e.key] // []) + $e.value)))}'
+disp config claude > /tmp/disp-claude.json
+jq -s "$MERGE" ~/.claude/settings.json /tmp/disp-claude.json > /tmp/claude-settings.merged.json
+diff <(jq -S . ~/.claude/settings.json) <(jq -S . /tmp/claude-settings.merged.json)
+# если diff устраивает:
+cp ~/.claude/settings.json ~/.claude/settings.json.bak
+cp /tmp/claude-settings.merged.json ~/.claude/settings.json
+```
+
+Ручной рецепт выполнять один раз: повторный запуск добавит записи второй раз (у `disp install` этой проблемы нет).
+
+### 3. Хуки Codex CLI
+
+```bash
+disp install codex    # создаёт ~/.codex/hooks.json или дополняет существующий
+```
+
+Потом в Codex открыть `/hooks` и **подтвердить доверие** новым хукам. Без этого Codex их молча пропускает. Любая правка определения хука (даже путь) сбрасывает доверие. Судя по описанию, доверие привязано к определению, а не к содержимому скрипта, так что сам `disp` можно обновлять без повторного подтверждения.
+
+### 4. Хуки Gemini CLI (по желанию)
+
+```bash
+disp install gemini   # создаёт ~/.gemini/settings.json или дополняет существующий
+```
+
+### 5. Панель и уведомления
+
+Панель: в любой панели zellij запустить `disp watch`. Сверху сводка, ниже список сессий: в широкой панели — таблица, в узкой (до ~60 колонок) — карточки по две строки. Список обновляется сам, когда агент присылает событие.
+
+| Клавиша | Действие |
+|---|---|
+| `↑` `↓`, `j` `k` | выбор строки |
+| `Enter`, `d` | подробности выбранной сессии: промпт, ответ, каталог, время, подзадачи |
+| `a`, пробел | принять результат; про работающую сессию панель сначала спросит |
+| `u` | вернуть принятую сессию в список (она видна после `Tab`) |
+| `g` | перейти в панель zellij, где идёт сессия |
+| `n` | дать строке название |
+| `l` | журнал смен статуса |
+| `s` | сортировка по следующей колонке: статус, агент, задача, где, возраст |
+| `S` | обратный порядок сортировки |
+| `t` | лента времени вместо колонки «ЧТО»: чем сессия была занята последние часы |
+| `+` `-` | масштаб ленты: 30 минут, 1, 3, 6, 12 и 24 часа |
+| `Tab` | показать и принятые |
+| `?` | справка по клавишам |
+| `q`, `Ctrl-C` | выход |
+
+Строки, которые требуют тебя, залиты целиком: ждущая — жёлтым, сбой и обрыв — красным; их видно при любой сортировке. Выбранную строку показывает отметка `▶` слева. У колонки, по которой отсортирован список, в заголовке стоит стрелка; сортировка не по статусу подписана ещё и в верхней строке.
+
+Верхняя строка состояния и нижняя строка подсказок — полосы с тёмно-серым фоном, чтобы они отличались от списка. В подсказках клавиши выделены ярким. Счётчик «ждут тебя», когда он не ноль, стоит в верхней полосе жёлтой плашкой; вопрос о приёмке работающей сессии занимает всю нижнюю полосу тем же цветом. Цвета полос взяты из 256-цветной палитры (`BAR_*` в `src/tui/view.rs`) и от темы терминала не зависят.
+
+Буквы работают и в русской раскладке. `disp watch --plain [сек]` — прежняя таблица без управления; она же включается сама, если вывод идёт не в терминал.
+
+Уведомления на рабочий стол работают сразу, если есть `notify-send`. Для Telegram создай `~/.config/disp/env` (и `chmod 600`). Токен впиши сам, в этом документе и в скрипте его нет:
+
+```
+DISP_TG_TOKEN=<токен бота>
+DISP_TG_CHAT=<chat id>
+DISP_NOTIFY_MIN_SEC=120
+DISP_STALE_MIN=30
+DISP_AUTO_OK_ON_EXIT=0
+```
+
+Если у тебя уже есть скрипт отправки в ops-шлюз, проще указать его: `DISP_NOTIFY_CMD=/путь/к/скрипту` — он получит текст первым аргументом.
+
+Что и когда отправляется:
+
+- **агент ждёт тебя** — сразу, один раз на ожидание;
+- **ход закончен** — только если ход длился дольше `DISP_NOTIFY_MIN_SEC` (по умолчанию 2 минуты), чтобы не звенело на каждый короткий ответ;
+- **сбой** — всегда.
+
+В уведомлении только строка статуса: задача, агент, длительность, место. Текста промптов и кода в ней нет. Локально в файлах состояния (права 600) хранятся обрезанные первый и последний промпт и последний ответ агента, до 300 символов.
+
+### 6. Проверка на живых агентах
+
+Это первый запуск на реальных событиях, поэтому сначала убедиться, что поля совпадают с ожидаемыми:
+
+1. Добавить в `~/.config/disp/env` строку `DISP_DEBUG=1`. Сырые события начнут писаться в `~/.local/state/disp/payloads.tsv`.
+2. В каждом агенте: открыть сессию, дать задание с вызовом инструмента, дождаться конца хода.
+3. `disp doctor` — у каждого агента должно быть «последнее событие N мин назад». `disp ls` — по строке на сессию со статусом ГОТОВО.
+4. Если строки нет или статус неверный — смотреть `payloads.tsv` (какие события и поля реально пришли) и `~/.local/state/disp/hook.log`.
+5. Убрать `DISP_DEBUG=1` и удалить `payloads.tsv`: в нём полные промпты и вывод инструментов.
+
+## Работа каждый день
+
+```
+disp                 таблица незакрытых сессий
+disp watch           живая панель: выбор строки, приёмка, подробности, переход к агенту
+disp show <id>       подробности: промпты, последний ответ агента, подзадачи, каталог
+disp ok <id>         принять результат; можно по имени задачи: disp ok nbx-142
+disp ok --ended      принять все закрытые сессии разом
+disp ok -f <id>      принять активную сессию, если она на самом деле мертва
+disp name <id> ...   дать строке понятное название
+disp log [N]         журнал: что меняло статус, пока тебя не было
+disp ls -a           показать и принятые; disp ls --json — данные для своих инструментов
+disp gc              удалить принятые записи старше 7 дней
+disp label           подписать панели zellij открытых сессий: «#номер название»
+disp unlabel         снять эти подписи со всех панелей
+```
+
+Правило, ради которого всё затевалось: **`disp ok` — только когда результат у тебя в руках.** Агент запустил сборку в CI и закончил ход — строку не принимать, а переименовать: `disp name <id> "жду macOS-билд из CI"`. Она останется наверху списка.
+
+Защита от самообмана встроена:
+
+- `disp ok` отказывается принимать сессию, которая ещё работает или ждёт тебя;
+- если принятая сессия снова закончила ход, упала или запросила разрешение, она возвращается в список;
+- закрытие сессии само по себе ничего не принимает (переключатель `DISP_AUTO_OK_ON_EXIT=1` включает автоприёмку при явном выходе, когда список начнёт раздражать).
+
+## Что проверено и что нет
+
+Проверено тестами (приложение B, 114 проверок, все проходят):
+
+- полный цикл Claude Code, Codex и Gemini CLI на событиях, собранных по документации;
+- несколько одновременных сессий одного агента и двух агентов над одной задачей;
+- хук не мешает агенту: всегда код 0, ничего не пишет в stdout для Claude и Codex, отдаёт `{}` для Gemini. Проверено на пустом вводе, битом JSON, событии на 400 КБ, отсутствии jq, недоступном каталоге, испорченном файле состояния;
+- 30 одновременных событий одной сессии ничего не теряют;
+- файл настроек не исполняется как shell; файлы состояния не создаются вне своего каталога;
+- `disp install` сохраняет чужие хуки и остальные ключи, при повторном запуске ничего не дублирует, битый файл настроек не трогает.
+
+Задержка одного вызова хука в тестовой среде — около 40 мс.
+
+Не проверено:
+
+- **Claude Code: события вне короткого цикла.** Живой прогон (2.1.325, режим `-p`) подтвердил SessionStart, UserPromptSubmit, PostToolUse, Stop и SessionEnd с ожидаемыми полями (`last_assistant_message`, `background_tasks`, `reason`). PermissionRequest, Notification, TaskCreated, TaskCompleted, SubagentStart, SubagentStop и StopFailure есть в схеме настроек этой версии, но вживую ещё не приходили.
+- **Codex: события вне короткого цикла.** Имена событий сверены с бинарником codex-cli 0.168.0 и со страницей документации (официальный адрес перенаправляет на learn.chatgpt.com/docs/hooks); отсюда появились Interrupt и SessionEnd с таймаутом 3 с. Живой прогон (`codex exec`, после подтверждения доверия в `/hooks`) подтвердил SessionStart, UserPromptSubmit, PostToolUse, Stop и SessionEnd с ожидаемыми полями. PermissionRequest, SubagentStart, SubagentStop и Interrupt вживую ещё не приходили.
+- **Расширения VSCode.** Расширения Claude Code и Codex должны читать те же настройки и вызывать те же хуки, но я этого не проверял.
+- Уведомления через `notify-send` и Telegram: в тестах проверен только общий механизм (через `DISP_NOTIFY_CMD`).
+
+## Ограничения v0
+
+- **Roo Code не охвачен**: готового механизма хуков у него я не нашёл.
+- **Подзадачи есть только у Claude Code** (события TaskCreated и TaskCompleted). У Codex и Gemini колонка будет пустой.
+- **«Где» — это сессия zellij и номер панели, не имя таба.** Имя таба хуку недоступно, поэтому и нужно правило «таб называется как задача».
+- **Конец сессии Codex** приходит событием SessionEnd только при штатном закрытии (или через 30 минут простоя без клиента). Убитая сессия Codex останется в списке как «тихо», её снимает `disp ok -f`.
+- **Прерывание по Esc.** В Codex приходит событие Interrupt: строка становится ГОТОВО с пометкой «ход прерван» и ждёт приёмки. В Claude Code события остановки нет: строка останется «работает» и через 30 минут станет «тихо»; обычно это чинит уведомление о простое.
+- **Длинная команда внутри одного вызова** (сборка на 40 минут) выглядит как «тихо». Это честный статус: событий нет. Порог меняется через `DISP_STALE_MIN`.
+- **Работа вне агентов не видна**: ручные задачи, CI, рендеры. Для них нужен реестр задач (Backlog.md), это отдельный слой.
+
+## Дальше
+
+### Панель на Rust с графикой
+
+**Состояние на 2026-11-14: этап 1 (ядро) готов.** В этом каталоге лежит Rust-версия (`Cargo.toml`, `src/`): тот же хук и те же команды, тот же формат файлов. Она проходит тот же набор проверок (`bash test.sh target/release/disp`), на живом состоянии печатает то же, что bash-версия, и установлена как `~/.local/bin/disp`. Вызов хука занимает около 2 мс вместо 48. Bash-версия сохранена как `~/.local/bin/disp.sh`; вернуть её: `cp ~/.local/bin/disp.sh ~/.local/bin/disp`. Сборка: `cargo build --release`.
+
+**Задача по проекту, над которым работает агент, версия 0.7.0.** Агент, запущенный в общем каталоге вроде `~/projects/tools`, теперь называется по подкаталогу, в который пишет файлы (`model_dispatcher`), а не по каталогу запуска (`written_path` и `project_dir` в `src/detect.rs`, поле `project` в записи сессии). На настоящих Claude Code 2.1.325 и Codex 0.168 проверено, в каком виде приходит путь: `tool_input.file_path` у `Write` и `Edit`, текст правки в `tool_input.command` у `apply_patch`. Запись через команды оболочки (Codex часто пишет файлы скриптом на Python) не распознаётся: по команде не понять, читали файл или писали. Поиск репозитория, как у git, не поднимается выше `GIT_CEILING_DIRECTORIES`.
+
+**Задача по каталогу запуска, версия 0.6.1.** Раньше колонка «ЗАДАЧА» определялась по текущему каталогу из события и менялась, когда агент переходил в другой каталог: в списке появлялись `tui` и `scratchpad`. Теперь каталог запуска хранится в сессии (`root`), задача и ветка определяются по нему (`launch_dir` в `src/detect.rs`). Запись прежней версии, где `root` нет, исправляется на первом же событии, не дожидаясь промпта, а у молчащих сессий — при запуске панели или командой `disp repair`: каталог запуска сессии Claude Code находится по её транскрипту (`~/.claude/projects/<проект>/<id>.jsonl`). На настоящем Claude Code 2.1.325 проверено: `CLAUDE_PROJECT_DIR` приходит хуку и не меняется после `cd`, а `cwd` в данных события меняется. Тесты — `tests/task_name.rs`.
+
+В версии 0.6.2 длинное имя задачи сжимается (не уже 12 знакомест), прежде чем из таблицы пропадут колонки «ID» и «ГДЕ»: номер панели нужнее хвоста имени.
+
+**Сортировка и выделение, версия 0.6.0.** Порядок по статусу изменён: требующие человека, работающие, простаивающие, готовые (`View` в `src/model.rs`); он общий для `disp ls` и панели. В панели клавиши `s` и `S` сортируют список по агенту, задаче, месту и возрасту (`sort_rows` в `src/board.rs`); место сортируется по номеру панели как по числу. Строки, требующие человека, залиты фоном, выбор показывает отметка слева. Проверено модульными тестами и в отдельной сессии zellij.
+
+**Подписи панелей zellij, версия 0.5.0.** Номера панелей в zellij идут в порядке создания, а не по расположению, поэтому по колонке «ГДЕ» (`zellij:dev#4`) панель глазами не найти. С `DISP_PANE_LABEL=1` в настройках диспетчер ставит этот номер на саму панель: её имя становится `#4 Название сессии` (`src/panes.rs`).
+
+- Подпись ставит хук отдельным процессом `zellij action rename-pane`, которого не ждёт: на границах хода и когда изменилось название. На событиях инструментов zellij не вызывается. При закрытии сессии подпись снимается (`undo-rename-pane`), и в заголовок панели возвращается то, что ставит программа.
+- `disp label` подписывает панели всех открытых сессий сразу; у сессии без названия берёт его из заголовка панели. `disp unlabel` снимает подписи диспетчера со всех панелей.
+- Имя панели заменяет заголовок, который ставит программа, в том числе в `zellij action list-panes`. Поэтому название сессии Codex теперь берётся из его списка сессий `~/.codex/session_index.jsonl` (поле `thread_name`), а заголовок панели — запасной источник; подпись диспетчера за название от агента не принимается.
+- Подписываются только панели с сессиями агентов, о которых диспетчер знает. Сессия, запущенная до подключения хуков, появится после перезапуска агента.
+
+Проверено: модульные тесты, тесты с поддельным zellij (`tests/pane_labels.rs`) и вживую в сессии `dev` — командой `disp label` и событиями хука, поданными вручную с отдельным каталогом состояния: промпт поставил подпись на панель, закрытие сессии вернуло заголовок программы. На событиях настоящего агента смена подписи ещё не наблюдалась.
+
+**Этап 3 (лента времени) готов, версия 0.4.0.** Клавиша `t` в панели заменяет колонку «ЧТО» лентой времени по каждой сессии; `+` и `-` меняют окно от 30 минут до суток. Лента строится по `events.jsonl` (`src/timeline.rs`). Высота полосы показывает важность: ожидание человека и сбой — самые высокие (жёлтый, красный), работа — средняя (голубой), молчание — такая же сиреневая, готовый и не принятый результат — узкая зелёная, простой — тонкая серая линия. У принятой сессии лента обрывается в момент приёмки.
+
+Рисуется лента двумя способами (`src/tui/gfx.rs`, `src/tui/view.rs`):
+
+- **Картинками** по протоколу Kitty graphics, как в term-gfx: на каждую строку — своя картинка RGBA с прозрачным фоном, шириной в ленту и высотой в одно знакоместо. При запуске панель спрашивает терминал, знает ли он протокол, и берёт размер знакоместа в пикселях. Картинка отправляется заново, только когда изменилась; окно сдвигается целыми пикселями, поэтому при окне три часа это раз в полминуты.
+- **Символами** (`━` и `─` в цвете статуса), если терминал протокола не знает или не сообщает размер в пикселях. `DISP_GFX=0` в настройках включает этот режим принудительно, `DISP_GFX=1` — картинки без вопроса к терминалу.
+
+Как это проверено. Экрана я не вижу, поэтому собран поддельный терминал (`dev/faketerm.py`): клиент zellij в псевдотерминале, который отвечает на запросы как терминал с протоколом и пишет в файл всё, что zellij ему присылает; `dev/shots.py` собирает из этого журнала PNG с картинками на их местах. Так проверено в отдельной сессии zellij 0.46: zellij сам декодирует картинки и размещает их заново, обрезая по границам панели и вокруг плавающих панелей; прозрачность сохраняется; текст и стирание строки поверх картинки её не удаляют; картинка с тем же номером заменяет прежнюю; при выходе из панели и при выключении ленты картинки удаляются. Ленты стоят на строках своих сессий в таблице и в карточках, а на настоящем состоянии совпадают с журналом. Не проверено: как это выглядит в Ghostty — цвета на прозрачном фоне, нет ли мигания при замене картинок, ровно ли лента стоит относительно текста.
+
+**Этап 2 (панель) готов, версия 0.3.0.** `disp watch` — панель на ratatui: выбор строки, подробности, приёмка с подтверждением для работающих сессий, название, журнал, переход в панель агента (`zellij action focus-pane-id terminal_N`). Клавиши — в разделе «Панель и уведомления». Код панели — `src/tui/`, общие с командами правила отбора и приёмки — `src/board.rs`. Проверено модульными тестами (отрисовка в память при ширине 50, 60, 80 и 110 колонок, разбор клавиш) и вживую в отдельной сессии zellij на тестовом состоянии: таблица (140 колонок) и карточки (50 колонок), все действия из таблицы клавиш, обновление при изменении файлов, выход по `q` и по SIGTERM с восстановлением терминала. Не проверено: переход `g` в панель на другой вкладке и вид панели рядом с настоящими агентами — это видно только на живом экране. Сборка, проверка и установка: `make`, `make test`, `make install` (ставит в `~/.local/bin/disp` переименованием, хуки не прерываются). Дальше: этап 3 — графика.
+
+Идея ложится на эту схему без переделок: панель — второй читатель тех же файлов, хуки трогать не нужно.
+
+Контракт данных, на который панель может опираться:
+
+- `~/.local/state/disp/sessions/<агент>-<session_id>.json` — одна строка JSON на сессию. Поля: `agent`, `session_id`, `cwd` (текущий каталог), `root` (каталог запуска), `project` (каталог проекта, если он глубже каталога запуска), `task`, `branch`, `where`, `status` (`idle`, `working`, `waiting`, `done`, `error`), `detail`, `title`, `tsrc` (откуда название: `agent` — от самого агента, `name` — задано через `disp name`, нет поля — из первого промпта), `last_prompt`, `last_reply`, `started`, `updated`, `turn_started`, `done_at`, `ended`, `end_reason`, `accepted`, `subtasks` (`{id: {s: текст, d: готово}}`), `subagents`, `bg`. Времена — unix-секунды.
+- `events.jsonl` — журнал смен статуса: `ts`, `agent`, `sid`, `task`, `where`, `from`, `to`.
+- `disp ls --json` — то же плюс вычисленные `sid` (короткий id) и `view` (`wait`, `err`, `lost`, `done`, `quiet`, `work`, `idle`).
+- Запись атомарная (временный файл и rename), читать можно в любой момент. Панель пять раз в секунду сверяет имена, время изменения и размер файлов в каталоге сессий и перечитывает их только при изменении; отдельная подписка через inotify не понадобилась.
+- Действия панель выполняет тем же кодом, что `disp ok` и `disp name`: под общей блокировкой перечитывает файл сессии и пишет в него.
+
+Что рисовать пикселями, а что оставить текстом:
+
+- **Текстом** (ratatui): сама таблица. Имена задач и статусы должны читаться при любом размере панели.
+- **Пикселями** (тем же протоколом, что в term-gfx): лента времени по каждой сессии за последние часы из `events.jsonl` — цветные отрезки «работает / ждёт / готово». По ней сразу видно, кто сколько простоял в ожидании тебя. Туда же кольца прогресса подзадач и пульсация ждущих строк.
+- **Запасной режим** псевдографикой (блоки, Брайль), когда графический протокол недоступен.
+
+Лента времени и запасной режим сделаны (этап 3, выше). Кольца подзадач и пульсация ждущих строк — нет.
+
+Перерисовывать только при изменении файлов: 131 кадр в секунду здесь не нужен.
+
+Делать это стоит на твоей машине, рядом с term-gfx: графику в панели zellij надо видеть глазами, из облака я её проверить не могу.
+
+### Остальное
+
+- `disp go <id>` — переход в панель сессии из командной строки. В панели это уже делает клавиша `g` (`zellij action focus-pane-id terminal_N`); осталось вынести в отдельную команду.
+- Подзадачи Codex: смотреть в `payloads.tsv`, приходит ли PostToolUse на обновление плана.
+- Реестр задач поверх сессий (Backlog.md) — когда понадобится видеть работу вне агентов.
+
+## Источники
+
+- [Claude Code: справочник по хукам](https://code.claude.com/docs/en/hooks.md)
+- [Gemini CLI: справочник по хукам](https://geminicli.com/docs/hooks/reference/)
+- [Codex CLI: хуки после GA (сторонний разбор)](https://codex.danielvaughan.com/2026/05/25/codex-cli-hooks-after-ga-event-model-trust-verification-production-patterns/)
+- [Codex: официальная страница хуков](https://developers.openai.com/codex/hooks) (перенаправляет на [learn.chatgpt.com/docs/hooks](https://learn.chatgpt.com/docs/hooks))
+
+## Приложение A. Скрипт `disp`
+
+```bash title="disp"
+#!/usr/bin/env bash
+# disp — диспетчер сессий AI-агентов (Claude Code, Codex CLI, Gemini CLI).
+#
+# Хуки агентов вызывают `disp hook <agent>`, скрипт ведёт по одному JSON-файлу
+# на сессию и показывает общую таблицу: что работает, что ждёт тебя,
+# что закончено и ещё не принято.
+#
+# Нужны: bash 4+, jq. Желательны: flock, git, notify-send, curl.
+# Состояние:  ${XDG_STATE_HOME:-~/.local/state}/disp/
+# Настройки:  ${XDG_CONFIG_HOME:-~/.config}/disp/env   (строки KEY=VALUE)
+
+set -u
+VERSION="0.1.0"
+STATE_DIR="${DISP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/disp}"
+SESS_DIR="$STATE_DIR/sessions"
+CONF_FILE="${DISP_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/disp/env}"
+
+now_ts() { printf '%s' "${DISP_NOW:-$(date +%s)}"; }
+
+# Читаем только известные ключи; файл не исполняется как shell.
+load_conf() {
+  [ -r "$CONF_FILE" ] || return 0
+  local k v
+  while IFS='=' read -r k v || [ -n "$k" ]; do
+    k="${k#"${k%%[![:space:]]*}"}"
+    k="${k%"${k##*[![:space:]]}"}"
+    case "$k" in '' | '#'*) continue ;; esac
+    k="${k#export }"
+    v="${v%$'\r'}"
+    v="${v#\"}"; v="${v%\"}"
+    v="${v#\'}"; v="${v%\'}"
+    case "$k" in
+      DISP_TG_TOKEN | DISP_TG_CHAT | DISP_NOTIFY_CMD | DISP_NOTIFY_MIN_SEC | DISP_DESKTOP | \
+        DISP_AUTO_OK_ON_EXIT | DISP_STALE_MIN | DISP_DEBUG | DISP_PANE_TITLE)
+        [ -n "${!k:-}" ] || printf -v "$k" '%s' "$v"
+        ;;
+    esac
+  done <"$CONF_FILE"
+}
+
+# ---------------------------------------------------------------- hook ------
+
+detect_where() {
+  if [ -n "${ZELLIJ:-}" ] || [ -n "${ZELLIJ_SESSION_NAME:-}" ]; then
+    printf 'zellij:%s#%s' "${ZELLIJ_SESSION_NAME:-?}" "${ZELLIJ_PANE_ID:-?}"
+  elif [ -n "${TMUX:-}" ]; then
+    printf 'tmux:%s' "${TMUX_PANE:-?}"
+  elif [ "${TERM_PROGRAM:-}" = vscode ] ||
+    [ -n "${VSCODE_PID:-}${VSCODE_IPC_HOOK:-}${VSCODE_IPC_HOOK_CLI:-}${VSCODE_CWD:-}" ]; then
+    printf 'vscode'
+  elif [ -n "${TERM_PROGRAM:-}" ]; then
+    printf '%s' "$TERM_PROGRAM"
+  elif [ -n "${GHOSTTY_RESOURCES_DIR:-}" ]; then
+    printf 'ghostty'
+  else
+    printf 'tty'
+  fi
+}
+
+# Краткое название сессии, которое агент придумал сам. Claude Code пишет его в транскрипт
+# (записи ai-title, после /rename — custom-title). У остальных агентов берём заголовок
+# панели zellij: Codex ставит туда «тема | проект».
+agent_title() { # agent_title <agent> <transcript_path> <full|fast> <имя каталога>
+  local agent="$1" tp="$2" mode="$3" dir="${4:-}" t="" id kind rest
+  if [ "$agent" = claude ]; then
+    [ -n "$tp" ] && [ -r "$tp" ] || return 0
+    tail -c 4000000 -- "$tp" 2>/dev/null | grep -a -E '"type":"(ai-title|custom-title)"' |
+      jq -rRn '[inputs | fromjson?]
+        | ((map(select(.type == "custom-title")) | last | .customTitle)
+           // (map(select(.type == "ai-title")) | last | .aiTitle) // empty)' 2>/dev/null
+    return 0
+  fi
+  [ "$mode" = full ] && [ "${DISP_PANE_TITLE:-1}" != 0 ] && [ -n "${ZELLIJ_PANE_ID:-}" ] &&
+    command -v zellij >/dev/null 2>&1 || return 0
+  local zl=(zellij action list-panes)
+  command -v timeout >/dev/null 2>&1 && zl=(timeout 2 "${zl[@]}")
+  while read -r id kind rest; do
+    [ "$id" = "terminal_${ZELLIJ_PANE_ID}" ] && t="$rest" && break
+  done < <("${zl[@]}" 2>/dev/null)
+  [ -n "$t" ] || return 0
+  # Убираем спиннер в начале и « | проект» в конце; заголовок оболочки (user@host:путь),
+  # имя агента и имя каталога названием задачи не считаем.
+  printf '%s' "$t" | jq -rR --arg agent "$agent" --arg dir "$dir" '
+    sub("^[^\\p{L}\\p{N}]+"; "")
+    | (if $dir != "" and endswith(" | " + $dir) then .[0:(length - (" | " + $dir | length))] else . end)
+    | sub("\\s+$"; "")
+    | if . == "" or . == $dir or (ascii_downcase == ($agent | ascii_downcase))
+         or test("^\\S+@\\S+:\\S*$") then empty else . end' 2>/dev/null
+}
+
+send_note() {
+  local text title
+  text="$(jq -r '.text // ""' <<<"$1" 2>/dev/null)"
+  title="$(jq -r '.title // ""' <<<"$1" 2>/dev/null)"
+  [ -n "$text" ] || return 0
+  if [ -n "${DISP_NOTIFY_CMD:-}" ]; then
+    ("$DISP_NOTIFY_CMD" "$text" "$title" </dev/null >/dev/null 2>&1 &)
+  fi
+  if [ "${DISP_DESKTOP:-1}" != 0 ] && command -v notify-send >/dev/null 2>&1; then
+    (notify-send -a disp -- "$text" "$title" </dev/null >/dev/null 2>&1 &)
+  fi
+  # В Telegram уходит только строка статуса: имя задачи, агент, место. Без текста промптов.
+  if [ -n "${DISP_TG_TOKEN:-}" ] && [ -n "${DISP_TG_CHAT:-}" ] && command -v curl >/dev/null 2>&1; then
+    (printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$DISP_TG_TOKEN" |
+      curl -sS --max-time 8 -o /dev/null -K - \
+        --data-urlencode "chat_id=${DISP_TG_CHAT}" \
+        --data-urlencode "text=${text}" >/dev/null 2>&1 &)
+  fi
+}
+
+# Переход состояния. stdin: payload хука. Вывод, три строки JSON:
+# новое состояние, уведомление (или null), запись журнала (или null).
+read -r -d '' JQ_STEP <<'JQ' || true
+def oneline: tostring | gsub("[\\n\\r\\t]+"; " ") | gsub("^ +| +$"; "");
+def clip($n): if length > $n then .[0:$n - 1] + "…" else . end;
+def dur($d): if $d < 60 then "\($d)с" elif $d < 3600 then "\($d / 60 | floor)м"
+             else "\($d / 3600 | floor)ч \(($d % 3600) / 60 | floor)м" end;
+(if type == "object" then . else {} end) as $p
+| ($oldf[0] // {}) as $o
+| ($o + {
+    agent: $agent,
+    session_id: $sid,
+    cwd: (if $cwd != "" then $cwd else ($o.cwd // "") end),
+    task: (if $task != "" then $task else ($o.task // "") end),
+    branch: (if $fresh == "1" then $branch else ($o.branch // "") end),
+    where: $where,
+    started: ($o.started // $now),
+    updated: $now,
+    status: ($o.status // "idle"),
+    title: ($o.title // ""),
+    detail: ($o.detail // ""),
+    ended: false,
+    accepted: ($o.accepted // false),
+    subtasks: ($o.subtasks // {}),
+    subagents: ($o.subagents // 0),
+    bg: ($o.bg // 0)
+  }) as $s
+| (if $s.branch != "" and $s.branch != $s.task and $s.branch != "main" and $s.branch != "master"
+   then $s.task + "@" + $s.branch else $s.task end) as $label
+| ({claude: "Claude", codex: "Codex", gemini: "Gemini"}[$agent] // $agent) as $who
+| (if $act == "start" then
+     $s
+   elif $act == "prompt" then
+     $s + {
+       status: "working", turn_started: $now, accepted: false, detail: "", bg: 0,
+       title: (if ($p.session_title // "") != "" then ($p.session_title | oneline | clip(80))
+               elif $s.title != "" then $s.title
+               else (($p.prompt // "") | oneline | clip(80)) end),
+       last_prompt: (($p.prompt // "") | oneline | clip(300))
+     }
+   elif $act == "tool" then
+     $s + (if $s.status == "waiting" or $s.status == "idle" or $s.status == "error"
+              or ($s.status == "done" and $p.agent_id == null)
+           then {status: "working", detail: ""} else {} end)
+   elif $act == "ask" then
+     ("разрешение: " + (($p.tool_name // "?") | oneline | clip(40))) as $d
+     | $s + {status: "waiting", detail: $d, accepted: false}
+       + (if $s.status != "waiting"
+          then {_n: {text: "✋ \($label) · \($who) ждёт тебя · \($d) · \($where)", title: $s.title}}
+          else {} end)
+   elif $act == "note" then
+     (($p.notification_type // "") | tostring) as $nt
+     | (($p.message // $nt) | oneline | clip(80)) as $d
+     | if ($nt | test("^(permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input|toolpermission)$"; "i"))
+          or ($nt == "" and $s.status == "working") then
+         $s + {status: "waiting", accepted: false}
+         + (if $s.status != "waiting"
+            then {detail: $d, _n: {text: "✋ \($label) · \($who) ждёт тебя · \($d) · \($where)", title: $s.title}}
+            else {} end)
+       elif $nt == "idle_prompt" and $s.status == "working" then
+         $s + {status: "done", done_at: $now, detail: "", accepted: false}
+       else $s end
+   elif $act == "tnew" then
+     if $p.task_id == null then $s
+     else $s + {subtasks: ($s.subtasks + {($p.task_id | tostring):
+            {s: (($p.task_subject // "") | oneline | clip(80)), d: false}})} end
+   elif $act == "tdone" then
+     if $p.task_id == null then $s
+     else ($p.task_id | tostring) as $id
+       | $s + {subtasks: ($s.subtasks + {($id):
+            {s: (($s.subtasks[$id].s // $p.task_subject // "") | oneline | clip(80)), d: true}})} end
+   elif $act == "subup" then
+     $s + {subagents: ($s.subagents + 1)}
+   elif $act == "subdown" then
+     $s + {subagents: ([$s.subagents - 1, 0] | max)}
+   elif $act == "stop" then
+     ($now - ($s.turn_started // $now)) as $d
+     | ($p.background_tasks | if type == "array" then length elif type == "number" then . else 0 end) as $bg
+     | $s + {
+         status: "done", done_at: $now, detail: "", bg: $bg, subagents: 0, accepted: false,
+         last_reply: (($p.last_assistant_message // $p.prompt_response // "") | oneline | clip(300)
+                      | if . == "" then ($s.last_reply // "") else . end)
+       }
+       + (if $d >= $minsec
+          then {_n: {text: ("✅ \($label) · \($who) закончил ход (\(dur($d)))"
+                            + (if $bg > 0 then " · в фоне: \($bg)" else "" end) + " · \($where)"),
+                     title: $s.title}}
+          else {} end)
+   elif $act == "fail" then
+     (($p.error // $p.message // $p.reason // "сбой") | oneline | clip(80)) as $d
+     | $s + {status: "error", done_at: $now, detail: $d, accepted: false,
+             _n: {text: "⛔ \($label) · \($who): \($d) · \($where)", title: $s.title}}
+   elif $act == "intr" then
+     # Ход прерван пользователем (Codex: Interrupt). Он сам у клавиатуры, уведомление не нужно,
+     # но строка остаётся в списке до явной приёмки.
+     $s + (if $s.status == "working" or $s.status == "waiting"
+           then {status: "done", done_at: $now, detail: "ход прерван", subagents: 0, accepted: false}
+           else {} end)
+   elif $act == "end" then
+     (($p.reason // "") | tostring) as $r
+     | $s + {ended: true, end_reason: $r}
+       + (if $autook == "1" and $s.status == "done" and ($r | test("^(prompt_input_exit|logout|exit)$"))
+          then {accepted: true, accepted_at: $now} else {} end)
+   else $s end) as $r
+| (if $atitle == "" or ($r.tsrc // "") == "name" then $r
+   else $r + {title: ($atitle | oneline | clip(80)), tsrc: "agent"} end) as $r
+| ($r | del(._n)),
+  ($r._n // null),
+  (if ($o.status // "new") != $r.status or $act == "end"
+   then {ts: $now, agent: $agent, sid: $sid, task: $label, where: $where,
+         from: ($o.status // "new"), to: (if $act == "end" then "ended" else $r.status end)}
+   else null end)
+JQ
+
+hook_main() {
+  local agent="$1" ev_arg="$2" payload="$3"
+  command -v jq >/dev/null 2>&1 || {
+    echo "$(date '+%F %T') disp: jq не найден"
+    return 0
+  }
+  [ -n "$payload" ] || payload='{}'
+  load_conf
+
+  if [ "${DISP_DEBUG:-0}" = 1 ]; then
+    (
+      umask 077
+      printf '%s\t%s\t%s\n' "$(date '+%F %T')" "$agent" \
+        "$(printf '%s' "$payload" | jq -c . 2>/dev/null || printf '"<не JSON>"')" \
+        >>"$STATE_DIR/payloads.tsv"
+    )
+  fi
+
+  local sid="" ev="" cwd="" tp=""
+  IFS=$'\x1f' read -r sid ev cwd tp < <(
+    printf '%s' "$payload" | jq -r --arg ev "$ev_arg" '
+      (if type == "object" then . else {} end)
+      | [(.session_id // .sessionId // .thread_id // .conversation_id // "" | tostring),
+         (.hook_event_name // $ev | tostring),
+         (.cwd // "" | tostring),
+         (.transcript_path // "" | tostring)] | join("\u001f")' 2>/dev/null
+  ) || true
+  [ -n "$ev" ] || ev="$ev_arg"
+  sid="$(printf '%s' "$sid" | tr -cd 'A-Za-z0-9._-' | cut -c1-80)"
+  [ -n "$sid" ] || sid="nosid-${PPID:-0}"
+  [ -n "$cwd" ] || cwd="$PWD"
+
+  local act
+  case "$ev" in
+    SessionStart) act=start ;;
+    UserPromptSubmit | BeforeAgent) act=prompt ;;
+    PostToolUse | PostToolUseFailure | PostToolBatch | AfterTool) act=tool ;;
+    PermissionRequest) act=ask ;;
+    Notification) act=note ;;
+    TaskCreated) act=tnew ;;
+    TaskCompleted) act=tdone ;;
+    SubagentStart) act=subup ;;
+    SubagentStop) act=subdown ;;
+    Stop | AfterAgent) act=stop ;;
+    StopFailure) act=fail ;;
+    Interrupt) act=intr ;;
+    SessionEnd) act=end ;;
+    *) return 0 ;;
+  esac
+
+  local file="$SESS_DIR/${agent}-${sid}.json" task="" branch="" fresh=0
+  if [ ! -s "$file" ] || [ "$act" = start ] || [ "$act" = prompt ]; then
+    fresh=1
+    if [ -n "${DISP_TASK:-}" ]; then
+      task="$DISP_TASK"
+    else
+      local top=""
+      top="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)" || top=""
+      task="$(basename -- "${top:-$cwd}")"
+    fi
+    branch="$(git -C "$cwd" symbolic-ref --quiet --short HEAD 2>/dev/null)" || branch=""
+  fi
+
+  local where now
+  where="$(detect_where)"
+  now="$(now_ts)"
+
+  # Название, которое агент дал сессии сам. События инструментов самые частые, поэтому на них
+  # ищем название, только пока оно ещё не найдено и строка не названа вручную.
+  local atitle="" cur=""
+  if [ "$act" = tool ]; then
+    [ -s "$file" ] && cur="$(<"$file")"
+    case "$cur" in
+      *'"tsrc":"agent"'* | *'"tsrc":"name"'*) ;;
+      *) atitle="$(agent_title "$agent" "$tp" fast "${cwd##*/}")" ;;
+    esac
+  else
+    atitle="$(agent_title "$agent" "$tp" full "${cwd##*/}")"
+  fi
+
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$STATE_DIR/lock"
+    flock -w 3 9 || true
+  fi
+
+  local oldsrc="$file" out=""
+  [ -s "$file" ] || oldsrc=/dev/null
+  step() {
+    printf '%s' "$payload" | jq -c \
+      --slurpfile oldf "$1" \
+      --arg agent "$agent" --arg sid "$sid" --arg act "$act" --arg cwd "$cwd" \
+      --arg task "$task" --arg branch "$branch" --arg fresh "$fresh" --arg where "$where" \
+      --arg autook "${DISP_AUTO_OK_ON_EXIT:-0}" --arg atitle "$atitle" \
+      --argjson now "$now" --argjson minsec "${DISP_NOTIFY_MIN_SEC:-120}" \
+      "$JQ_STEP" 2>/dev/null
+  }
+  out="$(step "$oldsrc")" || out=""
+  # Битый файл состояния или битый payload: начинаем строку заново с пустого payload.
+  [ -n "$out" ] || out="$(payload='{}' step /dev/null)" || out=""
+  [ -n "$out" ] || {
+    echo "$(date '+%F %T') disp: не удалось обработать событие $ev ($agent/$sid)"
+    return 0
+  }
+
+  local state="" note="" event=""
+  {
+    IFS= read -r state
+    IFS= read -r note || true
+    IFS= read -r event || true
+  } <<<"$out"
+  [ -n "$state" ] || return 0
+  (
+    umask 077
+    printf '%s\n' "$state" >"$file.tmp.$$" && mv -f "$file.tmp.$$" "$file"
+    case "$event" in '{'*) printf '%s\n' "$event" >>"$STATE_DIR/events.jsonl" ;; esac
+  )
+  exec 9>&- 2>/dev/null || true
+  case "$note" in '{'*) send_note "$note" ;; esac
+  return 0
+}
+
+cmd_hook() {
+  local agent="${1:-unknown}" ev_arg="${2:-}" payload=""
+  (umask 077; mkdir -p "$SESS_DIR") 2>/dev/null
+  payload="$(cat 2>/dev/null)" || payload=""
+  # Что бы ни случилось внутри, агенту возвращаем 0 и ничего не печатаем
+  # (Gemini CLI ждёт на stdout JSON, ему отдаём пустой объект).
+  (hook_main "$agent" "$ev_arg" "$payload") >>"$STATE_DIR/hook.log" 2>&1
+  [ "$agent" = gemini ] && printf '{}\n'
+  exit 0
+}
+
+# ---------------------------------------------------------------- вывод -----
+
+need_jq() {
+  command -v jq >/dev/null 2>&1 || {
+    echo "disp: нужен jq (sudo apt install jq)" >&2
+    exit 1
+  }
+}
+
+all_states() {
+  shopt -s nullglob
+  local files=("$SESS_DIR"/*.json)
+  shopt -u nullglob
+  [ "${#files[@]}" -gt 0 ] || return 0
+  cat -- "${files[@]}" 2>/dev/null
+}
+
+read -r -d '' JQ_LIB <<'JQ' || true
+def short: (.session_id | tostring | gsub("[^A-Za-z0-9]"; "") | ascii_downcase | .[-6:]);
+def view:
+  if .status == "waiting" then "wait"
+  elif .status == "error" then "err"
+  elif .status == "done" then "done"
+  elif .status == "working" and .ended then "lost"
+  elif .status == "working" and ($now - .updated) > ($stale * 60) then "quiet"
+  elif .status == "working" then "work"
+  else "idle" end;
+def rows: [inputs | fromjson? // empty | select(type == "object" and .session_id != null)
+           | . + {sid: short} | . + {view: view}];
+def tlabel: if (.branch // "") != "" and .branch != .task and .branch != "main" and .branch != "master"
+           then .task + "@" + .branch else (.task // "") end;
+JQ
+
+read -r -d '' JQ_LS <<'JQ' || true
+def pad($n): if length >= $n then .[0:$n] else . + (" " * ($n - length)) end;
+def clip($n): if $n <= 0 then "" elif length > $n then .[0:$n - 1] + "…" else . end;
+def age($t): ($now - $t) as $d
+  | if $d < 60 then "\($d)с" elif $d < 3600 then "\($d / 60 | floor)м"
+    elif $d < 86400 then "\($d / 3600 | floor)ч" else "\($d / 86400 | floor)д" end;
+def paint($c): if $color == "1" then "\u001b[" + $c + "m" + . + "\u001b[0m" else . end;
+{wait: 0, err: 1, lost: 2, done: 3, quiet: 4, work: 5, idle: 6} as $ord
+| {wait: "! ЖДЁТ", err: "x СБОЙ", lost: "x ПРЕРВАНА", done: "✓ ГОТОВО",
+   quiet: "? тихо", work: "● работает", idle: "○ простой"} as $name
+| {wait: "1;33", err: "1;31", lost: "1;31", done: "32", quiet: "35", work: "36", idle: "2"} as $col
+| rows
+| (if $all == "1" then .
+   else map(select((.accepted | not)
+                   and ((.view == "idle" and (.ended or ($now - .updated) > 43200)) | not))) end)
+| sort_by([$ord[.view], .updated])
+| . as $r
+| ([$cols - 81, 12] | max) as $tw
+| if ($r | length) == 0 then
+    "Незакрытых сессий нет.  (disp ls -a покажет и принятые)"
+  else
+    ("ждут тебя: \($r | map(select(.view == "wait" or .view == "err" or .view == "lost")) | length)"
+     + " · не принято: \($r | map(select(.view == "done")) | length)"
+     + " · работают: \($r | map(select(.view == "work")) | length)"
+     + " · тихо: \($r | map(select(.view == "quiet")) | length)"),
+    (("ID" | pad(6)) + " " + ("СТАТУС" | pad(10)) + " " + ("АГЕНТ" | pad(6)) + " "
+     + ("ЗАДАЧА" | pad(22)) + " " + ("ПОДЗ" | pad(7)) + " " + ("ГДЕ" | pad(18)) + " "
+     + ("ВОЗР" | pad(4)) + " ЧТО" | paint("1")),
+    ($r[]
+     | .view as $v
+     | (.subtasks // {} | to_entries) as $st
+     | ((if ($st | length) > 0 then "\($st | map(select(.value.d)) | length)/\($st | length)" else "—" end)
+        + (if (.subagents // 0) > 0 then " а\(.subagents)" else "" end)
+        + (if (.bg // 0) > 0 then " ф\(.bg)" else "" end)) as $sub
+     | ((if (.detail // "") != "" then .detail + " · " else "" end) + (.title // "")) as $what
+     | ((.sid | pad(6)) + " " + ($name[.view] | pad(10)) + " " + ((.agent // "?") | pad(6)) + " "
+        + (tlabel | clip(22) | pad(22)) + " " + ($sub | clip(7) | pad(7)) + " "
+        + ((if .ended then "закрыта" else (.where // "?") end) | clip(18) | pad(18)) + " "
+        + (age(.updated) | pad(4)) + " " + ($what | clip($tw))
+        + (if .accepted then "  [принято]" else "" end))
+       | paint($col[$v]))
+  end
+JQ
+
+read -r -d '' JQ_SHOW <<'JQ' || true
+def t($x): if $x == null then "—" else ($x | strftime("%Y-%m-%d %H:%M:%S UTC")) end;
+rows | map(select(.sid == $q or (.sid | startswith($q)) or .task == $q or .session_id == $q))
+| if length == 0 then "Не найдено: \($q)"
+  else .[]
+    | "\(.sid)  \(tlabel)  [\(.agent)]",
+      "  статус:    \(.status)\(if .ended then " (сессия закрыта\(if (.end_reason // "") != "" then ": " + .end_reason else "" end))" else "" end)\(if .accepted then " [принято]" else "" end)",
+      (if (.detail // "") != "" then "  деталь:    \(.detail)" else empty end),
+      "  что:       \(.title // "")",
+      (if (.last_prompt // "") != "" and .last_prompt != .title then "  промпт:    \(.last_prompt)" else empty end),
+      (if (.last_reply // "") != "" then "  ответ:     \(.last_reply)" else empty end),
+      "  где:       \(.where // "?")",
+      "  каталог:   \(.cwd // "")",
+      "  сессия:    \(.session_id)",
+      "  начата:    \(t(.started))",
+      "  обновлена: \(t(.updated))",
+      (if (.done_at // null) != null then "  ход окончен: \(t(.done_at))" else empty end),
+      (if (.subagents // 0) > 0 then "  субагентов в работе: \(.subagents)" else empty end),
+      (if (.bg // 0) > 0 then "  фоновых задач на момент остановки: \(.bg)" else empty end),
+      ((.subtasks // {}) | to_entries
+       | if length > 0 then "  подзадачи:", (.[] | "    [\(if .value.d then "x" else " " end)] \(.value.s)") else empty end),
+      ""
+  end
+JQ
+
+term_cols() {
+  local c="${COLUMNS:-}"
+  [ -n "$c" ] || c="$(tput cols 2>/dev/null)" || c=""
+  case "$c" in '' | *[!0-9]*) c=120 ;; esac
+  printf '%s' "$c"
+}
+
+cmd_ls() {
+  need_jq
+  load_conf
+  local all=0 color=0
+  [ -t 1 ] && color=1
+  [ "${DISP_COLOR:-}" = 1 ] && color=1
+  [ "${DISP_COLOR:-}" = 0 ] && color=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -a | --all) all=1 ;;
+      --json)
+        all_states | jq -Rn --argjson now "$(now_ts)" --argjson stale "${DISP_STALE_MIN:-30}" \
+          "$JQ_LIB rows"
+        return
+        ;;
+    esac
+    shift
+  done
+  all_states | jq -Rrn --argjson now "$(now_ts)" --argjson stale "${DISP_STALE_MIN:-30}" \
+    --argjson cols "$(term_cols)" --arg all "$all" --arg color "$color" "$JQ_LIB $JQ_LS"
+}
+
+cmd_show() {
+  need_jq
+  load_conf
+  [ $# -ge 1 ] || {
+    echo "использование: disp show <id|задача>" >&2
+    exit 2
+  }
+  all_states | jq -Rrn --argjson now "$(now_ts)" --argjson stale "${DISP_STALE_MIN:-30}" \
+    --arg q "$1" "$JQ_LIB $JQ_SHOW"
+}
+
+# Список файлов сессий, подходящих под селектор.
+match_files() {
+  local q="$1" f
+  shopt -s nullglob
+  for f in "$SESS_DIR"/*.json; do
+    jq -e --arg q "$q" --argjson now "$(now_ts)" --argjson stale "${DISP_STALE_MIN:-30}" '
+      def short: (.session_id | tostring | gsub("[^A-Za-z0-9]"; "") | ascii_downcase | .[-6:]);
+      select(type == "object" and .session_id != null)
+      | if $q == "--ended" then (.ended == true and (.accepted | not))
+        elif $q == "--done" then (.status == "done" and (.accepted | not))
+        else (short == $q or (($q | length) >= 3 and (short | startswith($q))) or .task == $q or .session_id == $q) end
+    ' "$f" >/dev/null 2>&1 && printf '%s\n' "$f"
+  done
+  shopt -u nullglob
+}
+
+edit_file() { # edit_file <file> <jq-фильтр> [доп. аргументы jq]
+  local f="$1" filter="$2"
+  shift 2
+  local new
+  new="$(jq -c "$@" "$filter" "$f" 2>/dev/null)" || return 1
+  [ -n "$new" ] || return 1
+  (
+    umask 077
+    printf '%s\n' "$new" >"$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"
+  )
+}
+
+cmd_ok() {
+  need_jq
+  load_conf
+  [ $# -ge 1 ] || {
+    echo "использование: disp ok [-f] <id|задача>... | --ended | --done" >&2
+    exit 2
+  }
+  local q f n=0 skipped=0 force=0
+  for q in "$@"; do
+    case "$q" in -f | --force) force=1 ;; esac
+  done
+  for q in "$@"; do
+    case "$q" in -f | --force) continue ;; esac
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      # Активную сессию принять нельзя: она исчезла бы из списка, пока ещё работает или ждёт тебя.
+      if [ "$force" = 0 ] && jq -e '(.status == "working" or .status == "waiting") and (.ended != true)' "$f" >/dev/null 2>&1; then
+        skipped=$((skipped + 1))
+        jq -r '"пропущено (ещё \(if .status == "waiting" then "ждёт тебя" else "работает" end)): \(.task // "?") [\(.agent // "?")] \(.title // "")"' "$f" >&2
+        continue
+      fi
+      if edit_file "$f" '.accepted = true | .accepted_at = $now' --argjson now "$(now_ts)"; then
+        n=$((n + 1))
+        jq -r '"принято: \(.task // "?") [\(.agent // "?")] \(.title // "")"' "$f"
+      fi
+    done < <(match_files "$q")
+  done
+  [ "$skipped" -eq 0 ] || echo "Активные сессии не приняты. Если сессия мертва: disp ok -f <id>" >&2
+  [ "$n" -gt 0 ] || {
+    [ "$skipped" -gt 0 ] || echo "Ничего не найдено под: $*" >&2
+    exit 1
+  }
+}
+
+cmd_name() {
+  need_jq
+  [ $# -ge 2 ] || {
+    echo "использование: disp name <id> <текст>" >&2
+    exit 2
+  }
+  local q="$1" f n=0
+  shift
+  local text="$*"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    edit_file "$f" '.title = $t | .tsrc = "name"' --arg t "$text" && n=$((n + 1))
+  done < <(match_files "$q")
+  [ "$n" -gt 0 ] || {
+    echo "Не найдено: $q" >&2
+    exit 1
+  }
+}
+
+cmd_log() {
+  need_jq
+  local n="${1:-30}"
+  case "$n" in '' | *[!0-9]*) n=30 ;; esac
+  [ -s "$STATE_DIR/events.jsonl" ] || {
+    echo "Журнал пуст."
+    return 0
+  }
+  tail -n "$n" "$STATE_DIR/events.jsonl" | jq -Rr '
+    fromjson? // empty
+    | {new: "новая", idle: "простой", working: "работает", waiting: "ЖДЁТ", done: "ГОТОВО",
+       error: "СБОЙ", ended: "закрыта"} as $n
+    | "\(.ts | localtime | strftime("%m-%d %H:%M"))  \(.agent)  \(.task)  \($n[.from] // .from) → \($n[.to] // .to)  (\(.where))"'
+}
+
+cmd_gc() {
+  need_jq
+  local days="${1:-7}" f n=0
+  case "$days" in '' | *[!0-9]*) days=7 ;; esac
+  shopt -s nullglob
+  for f in "$SESS_DIR"/*.json; do
+    if jq -e --argjson now "$(now_ts)" --argjson d "$days" '
+        (.accepted == true or ((.status // "idle") == "idle"))
+        and ($now - (.updated // 0)) > ($d * 86400)' "$f" >/dev/null 2>&1; then
+      rm -f -- "$f" && n=$((n + 1))
+    fi
+  done
+  shopt -u nullglob
+  if [ -s "$STATE_DIR/events.jsonl" ] && [ "$(wc -l <"$STATE_DIR/events.jsonl")" -gt 5000 ]; then
+    tail -n 5000 "$STATE_DIR/events.jsonl" >"$STATE_DIR/events.jsonl.tmp.$$" &&
+      mv -f "$STATE_DIR/events.jsonl.tmp.$$" "$STATE_DIR/events.jsonl"
+  fi
+  echo "удалено записей: $n (принятые и пустые старше $days дн.)"
+}
+
+cmd_watch() {
+  local sec="${1:-2}" out
+  trap 'printf "\033[?25h"; exit 0' INT TERM
+  printf '\033[?25l'
+  while :; do
+    out="$(DISP_COLOR=1 COLUMNS="$(term_cols)" cmd_ls)"
+    printf '\033[H\033[2J%s  disp %s\n\n%s\n' "$(date '+%H:%M:%S')" "$VERSION" "$out"
+    sleep "$sec"
+  done
+}
+
+self_path() {
+  local s
+  s="$(command -v -- "$0" 2>/dev/null)" || s="$0"
+  readlink -f -- "$s" 2>/dev/null || printf '%s' "$s"
+}
+
+cmd_config() {
+  local me agent="${1:-}"
+  me="$(self_path)"
+  case "$agent" in
+    claude)
+      cat <<EOF
+{
+  "hooks": {
+    "SessionStart":      [{ "hooks": [{ "type": "command", "command": "$me hook claude", "timeout": 5 }] }],
+    "UserPromptSubmit":  [{ "hooks": [{ "type": "command", "command": "$me hook claude", "timeout": 5 }] }],
+    "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "$me hook claude", "timeout": 5 }] }],
+    "Notification":      [{ "hooks": [{ "type": "command", "command": "$me hook claude", "timeout": 5 }] }],
+    "PostToolUse":       [{ "hooks": [{ "type": "command", "command": "$me hook claude", "timeout": 5 }] }],
+    "TaskCreated":       [{ "hooks": [{ "type": "command", "command": "$me hook claude", "timeout": 5 }] }],
+    "TaskCompleted":     [{ "hooks": [{ "type": "command", "command": "$me hook claude", "timeout": 5 }] }],
+    "SubagentStart":     [{ "hooks": [{ "type": "command", "command": "$me hook claude", "timeout": 5 }] }],
+    "SubagentStop":      [{ "hooks": [{ "type": "command", "command": "$me hook claude", "timeout": 5 }] }],
+    "Stop":              [{ "hooks": [{ "type": "command", "command": "$me hook claude", "timeout": 5 }] }],
+    "StopFailure":       [{ "hooks": [{ "type": "command", "command": "$me hook claude", "timeout": 5 }] }],
+    "SessionEnd":        [{ "hooks": [{ "type": "command", "command": "$me hook claude", "timeout": 5 }] }]
+  }
+}
+EOF
+      ;;
+    codex)
+      cat <<EOF
+{
+  "hooks": {
+    "SessionStart":      [{ "hooks": [{ "type": "command", "command": "$me hook codex", "timeout": 5 }] }],
+    "UserPromptSubmit":  [{ "hooks": [{ "type": "command", "command": "$me hook codex", "timeout": 5 }] }],
+    "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "$me hook codex", "timeout": 5 }] }],
+    "PostToolUse":       [{ "hooks": [{ "type": "command", "command": "$me hook codex", "timeout": 5 }] }],
+    "SubagentStart":     [{ "hooks": [{ "type": "command", "command": "$me hook codex", "timeout": 5 }] }],
+    "SubagentStop":      [{ "hooks": [{ "type": "command", "command": "$me hook codex", "timeout": 5 }] }],
+    "Stop":              [{ "hooks": [{ "type": "command", "command": "$me hook codex", "timeout": 5 }] }],
+    "Interrupt":         [{ "hooks": [{ "type": "command", "command": "$me hook codex", "timeout": 3 }] }],
+    "SessionEnd":        [{ "hooks": [{ "type": "command", "command": "$me hook codex", "timeout": 3 }] }]
+  }
+}
+EOF
+      ;;
+    gemini)
+      cat <<EOF
+{
+  "hooks": {
+    "SessionStart": [{ "matcher": "*", "hooks": [{ "name": "disp", "type": "command", "command": "$me hook gemini", "timeout": 5000 }] }],
+    "BeforeAgent":  [{ "matcher": "*", "hooks": [{ "name": "disp", "type": "command", "command": "$me hook gemini", "timeout": 5000 }] }],
+    "AfterTool":    [{ "matcher": "*", "hooks": [{ "name": "disp", "type": "command", "command": "$me hook gemini", "timeout": 5000 }] }],
+    "Notification": [{ "matcher": "*", "hooks": [{ "name": "disp", "type": "command", "command": "$me hook gemini", "timeout": 5000 }] }],
+    "AfterAgent":   [{ "matcher": "*", "hooks": [{ "name": "disp", "type": "command", "command": "$me hook gemini", "timeout": 5000 }] }],
+    "SessionEnd":   [{ "matcher": "*", "hooks": [{ "name": "disp", "type": "command", "command": "$me hook gemini", "timeout": 5000 }] }]
+  }
+}
+EOF
+      ;;
+    *)
+      echo "использование: disp config claude|codex|gemini" >&2
+      exit 2
+      ;;
+  esac
+}
+
+# Идемпотентно подключает хуки к настройкам агента: добавляет только недостающие записи,
+# чужие хуки и остальные ключи не трогает, перед записью делает копию <файл>.bak-disp.
+cmd_install() {
+  need_jq
+  local agent="${1:-}" file hint
+  case "$agent" in
+    claude)
+      file="${DISP_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
+      hint="Открытые сессии Claude Code подхватят хуки после /hooks или перезапуска."
+      ;;
+    codex)
+      file="${DISP_CODEX_HOOKS:-$HOME/.codex/hooks.json}"
+      hint="Открой /hooks в Codex и подтверди доверие: без этого он хуки пропускает."
+      ;;
+    gemini)
+      file="${DISP_GEMINI_SETTINGS:-$HOME/.gemini/settings.json}"
+      hint="Новые сессии Gemini CLI подхватят хуки при запуске."
+      ;;
+    *)
+      echo "использование: disp install claude|codex|gemini" >&2
+      exit 2
+      ;;
+  esac
+  local block new
+  block="$(cmd_config "$agent")"
+  if [ ! -s "$file" ]; then
+    mkdir -p -- "$(dirname -- "$file")" && printf '%s\n' "$block" >"$file" || {
+      echo "disp: не удалось записать $file" >&2
+      exit 1
+    }
+    echo "создан $file"
+    echo "$hint"
+    return 0
+  fi
+  new="$(jq --argjson b "$block" '
+    reduce ($b.hooks | to_entries[]) as $e (.;
+      ($e.value[0].hooks[0].command) as $cmd
+      | if ([(.hooks[$e.key] // [])[] | .hooks[]? | .command] | index($cmd)) != null then .
+        else .hooks[$e.key] = ((.hooks[$e.key] // []) + $e.value) end)' "$file" 2>/dev/null)" || new=""
+  [ -n "$new" ] || {
+    echo "disp: $file не читается как JSON-объект, ничего не изменено" >&2
+    exit 1
+  }
+  if [ "$(jq -cS . "$file")" = "$(jq -cS . <<<"$new")" ]; then
+    echo "хуки disp уже подключены в $file, изменений нет"
+    return 0
+  fi
+  cp -p -- "$file" "$file.bak-disp" || {
+    echo "disp: не удалось сделать копию $file.bak-disp, ничего не изменено" >&2
+    exit 1
+  }
+  printf '%s\n' "$new" >"$file.tmp.$$" && {
+    chmod --reference="$file" "$file.tmp.$$" 2>/dev/null
+    mv -f "$file.tmp.$$" "$file"
+  } || {
+    rm -f -- "$file.tmp.$$"
+    echo "disp: не удалось записать $file" >&2
+    exit 1
+  }
+  echo "хуки disp добавлены в $file (копия: $file.bak-disp)"
+  echo "$hint"
+}
+
+cmd_doctor() {
+  local t a last
+  echo "disp $VERSION"
+  echo "скрипт:    $(self_path)"
+  echo "состояние: $STATE_DIR"
+  echo "настройки: $CONF_FILE$([ -r "$CONF_FILE" ] || printf ' (нет файла)')"
+  for t in jq flock git notify-send curl; do
+    if command -v "$t" >/dev/null 2>&1; then echo "  ok   $t"; else echo "  нет  $t"; fi
+  done
+  command -v jq >/dev/null 2>&1 || return 0
+  load_conf
+  echo "Telegram:  $([ -n "${DISP_TG_TOKEN:-}" ] && [ -n "${DISP_TG_CHAT:-}" ] && echo настроен || echo 'не настроен')"
+  for a in claude codex gemini; do
+    last="$(all_states | jq -Rrn --arg a "$a" --argjson now "$(now_ts)" '
+      [inputs | fromjson? // empty | select(.agent == $a) | .updated] | max
+      | if . == null then "событий не было"
+        else "последнее событие \((($now - .) / 60) | floor) мин назад" end')"
+    printf '  %-7s %s\n' "$a" "$last"
+  done
+  if [ -s "$STATE_DIR/hook.log" ]; then
+    echo "последние строки hook.log:"
+    tail -n 5 "$STATE_DIR/hook.log" | sed 's/^/  /'
+  fi
+}
+
+usage() {
+  cat <<EOF
+disp $VERSION — диспетчер сессий AI-агентов
+
+  disp               таблица незакрытых сессий (то же, что disp ls)
+  disp ls [-a]       -a: показать и принятые; --json: сырые данные
+  disp watch [сек]   живая таблица (для отдельной панели)
+  disp show <id>     подробности: промпт, последний ответ, подзадачи
+  disp ok <id|задача>...   принять результат (строка уходит из списка)
+  disp ok --ended    принять все закрытые сессии; --done: все законченные
+  disp ok -f <id>    принять активную сессию (если она на самом деле мертва)
+  disp name <id> <текст>   дать строке понятное название
+  disp log [N]       журнал смен статуса: что происходило, пока тебя не было
+  disp gc [дней]     удалить принятые и пустые записи старше N дней (7)
+  disp install <claude|codex|gemini>  подключить хуки к настройкам агента
+                     (добавляет только недостающее, делает копию .bak-disp)
+  disp config <claude|codex|gemini>   напечатать блок хуков для агента
+  disp doctor        проверка окружения и того, какие агенты шлют события
+  disp hook <agent>  вызывается хуками агента, вручную не нужен
+EOF
+}
+
+main() {
+  local cmd="${1:-ls}"
+  [ $# -gt 0 ] && shift
+  case "$cmd" in
+    hook) cmd_hook "$@" ;;
+    ls | list) cmd_ls "$@" ;;
+    watch) cmd_watch "$@" ;;
+    show) cmd_show "$@" ;;
+    ok | accept) cmd_ok "$@" ;;
+    name) cmd_name "$@" ;;
+    log) cmd_log "$@" ;;
+    gc) cmd_gc "$@" ;;
+    config) cmd_config "$@" ;;
+    install) cmd_install "$@" ;;
+    doctor) cmd_doctor ;;
+    -h | --help | help) usage ;;
+    -V | --version) echo "disp $VERSION" ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"
+```
+
+## Приложение B. Тесты
+
+```bash title="test.sh"
+#!/usr/bin/env bash
+# Тесты disp на симулированных событиях хуков. Запуск: ./test.sh [путь к disp]
+set -u
+DISP="${1:-$(dirname "$(readlink -f "$0")")/disp}"
+T="$(mktemp -d)"
+export DISP_STATE_DIR="$T/state" DISP_CONFIG="$T/env" DISP_DESKTOP=0 DISP_COLOR=0 COLUMNS=140
+export DISP_PANE_TITLE=0   # настоящий zellij в тестах не опрашиваем; раздел 12 подставляет свой
+export XDG_STATE_HOME="$T/xdg"
+NOTES="$T/notes.log"
+cat >"$T/notify.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s | %s\n' "\$1" "\$2" >>"$NOTES"
+EOF
+chmod +x "$T/notify.sh"
+export DISP_NOTIFY_CMD="$T/notify.sh"
+unset ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID TMUX TERM_PROGRAM VSCODE_PID VSCODE_IPC_HOOK VSCODE_IPC_HOOK_CLI VSCODE_CWD GHOSTTY_RESOURCES_DIR DISP_TASK CLAUDE_PROJECT_DIR DISP_PANE_LABEL
+
+pass=0 fail=0
+ok() { pass=$((pass + 1)); printf '  ok   %s\n' "$1"; }
+no() { fail=$((fail + 1)); printf '  FAIL %s\n       %s\n' "$1" "${2:-}"; }
+check() { # check <описание> <ожидание> <факт>
+  if [ "$2" = "$3" ]; then ok "$1"; else no "$1" "ожидалось [$2], получено [$3]"; fi
+}
+has() { # has <описание> <подстрока> <текст>
+  case "$3" in *"$2"*) ok "$1" ;; *) no "$1" "нет [$2] в: $3" ;; esac
+}
+hasnt() {
+  case "$3" in *"$2"*) no "$1" "лишнее [$2] в: $3" ;; *) ok "$1" ;; esac
+}
+field() { jq -r "$2" "$DISP_STATE_DIR/sessions/$1.json" 2>/dev/null; }
+settle() { sleep 0.3; }
+
+# Рабочие каталоги: два worktree-подобных репозитория.
+mkdir -p "$T/nbx-142" "$T/site-31"
+git -C "$T/nbx-142" init -q -b nbx-142 2>/dev/null
+git -C "$T/site-31" init -q -b main 2>/dev/null
+
+CA="aaaaaaaa-1111-4111-8111-00000000a1b2"   # Claude, задача nbx-142
+CB="019a0000-0000-7000-8000-0000000c0de1"   # Codex,  задача nbx-142 (UUIDv7: общий префикс)
+CC="019a0000-0000-7000-8000-0000000c0de2"   # Codex,  задача site-31
+GD="gemini-session-d4"                       # Gemini, задача site-31
+
+ev() { # ev <agent> <json>  [env...]
+  local agent="$1" json="$2"
+  shift 2
+  printf '%s' "$json" | env "$@" "$DISP" hook "$agent"
+}
+
+echo "== 1. Claude Code: полный цикл с подзадачами и разрешением"
+export DISP_NOW=1000
+Z=(ZELLIJ=0 ZELLIJ_SESSION_NAME=main ZELLIJ_PANE_ID=3)
+out="$(ev claude "{\"session_id\":\"$CA\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"SessionStart\",\"source\":\"startup\"}" "${Z[@]}")"
+check "SessionStart: stdout пуст" "" "$out"
+check "SessionStart: статус idle" "idle" "$(field "claude-$CA" .status)"
+check "задача = имя каталога репозитория" "nbx-142" "$(field "claude-$CA" .task)"
+check "где = zellij:сессия#панель" "zellij:main#3" "$(field "claude-$CA" .where)"
+
+out="$(ev claude "{\"session_id\":\"$CA\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Собери билд под macOS\\nи подпиши его\"}" "${Z[@]}")"
+check "UserPromptSubmit: stdout пуст (иначе попал бы в контекст Claude)" "" "$out"
+check "статус working" "working" "$(field "claude-$CA" .status)"
+check "название из первого промпта, в одну строку" "Собери билд под macOS и подпиши его" "$(field "claude-$CA" .title)"
+
+for i in 1 2 3; do
+  ev claude "{\"session_id\":\"$CA\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"TaskCreated\",\"task_id\":\"$i\",\"task_subject\":\"Шаг $i\"}" "${Z[@]}"
+done
+ev claude "{\"session_id\":\"$CA\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"TaskCompleted\",\"task_id\":\"1\",\"task_subject\":\"Шаг 1\"}" "${Z[@]}"
+check "подзадачи: 3 создано" "3" "$(field "claude-$CA" '.subtasks | length')"
+check "подзадачи: 1 закрыта" "1" "$(field "claude-$CA" '[.subtasks[] | select(.d)] | length')"
+
+export DISP_NOW=1100
+ev claude "{\"session_id\":\"$CA\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"PermissionRequest\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"codesign\"}}" "${Z[@]}"
+check "PermissionRequest: waiting" "waiting" "$(field "claude-$CA" .status)"
+ev claude "{\"session_id\":\"$CA\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"Notification\",\"notification_type\":\"permission_prompt\",\"message\":\"Claude needs your permission to use Bash\"}" "${Z[@]}"
+settle
+check "уведомление «ждёт» ровно одно (PermissionRequest + Notification не дублируют)" "1" "$(grep -c '✋' "$NOTES" 2>/dev/null)"
+has "в уведомлении задача, агент и место" "nbx-142 · Claude ждёт тебя · разрешение: Bash · zellij:main#3" "$(cat "$NOTES")"
+
+ev claude "{\"session_id\":\"$CA\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{},\"tool_response\":{}}" "${Z[@]}"
+check "PostToolUse после разрешения: снова working" "working" "$(field "claude-$CA" .status)"
+
+export DISP_NOW=1900
+ev claude "{\"session_id\":\"$CA\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"Билд готов: dist/Nebularix.dmg\",\"background_tasks\":[{\"id\":\"b1\"}]}" "${Z[@]}"
+settle
+check "Stop: done" "done" "$(field "claude-$CA" .status)"
+check "Stop: фоновые задачи посчитаны" "1" "$(field "claude-$CA" .bg)"
+has "длинный ход: уведомление о завершении с длительностью" "✅ nbx-142 · Claude закончил ход (15м) · в фоне: 1" "$(cat "$NOTES")"
+
+export DISP_NOW=2000
+ev claude "{\"session_id\":\"$CA\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"Notification\",\"notification_type\":\"idle_prompt\",\"message\":\"Claude is waiting for your input\"}" "${Z[@]}"
+check "idle_prompt не превращает done в waiting" "done" "$(field "claude-$CA" .status)"
+
+echo "== 2. Codex: вторая сессия той же задачи, ждёт разрешения"
+export DISP_NOW=2100
+V=(TERM_PROGRAM=vscode)
+out="$(ev codex "{\"session_id\":\"$CB\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"SessionStart\",\"source\":\"startup\",\"model\":\"gpt\"}" "${V[@]}")"
+check "Codex SessionStart: stdout пуст (иначе стал бы developer-контекстом)" "" "$out"
+ev codex "{\"session_id\":\"$CB\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Проверь подпись и нотаризацию\"}" "${V[@]}"
+ev codex "{\"session_id\":\"$CB\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"PermissionRequest\",\"tool_name\":\"Bash\"}" "${V[@]}"
+check "Codex: waiting" "waiting" "$(field "codex-$CB" .status)"
+check "Codex: где = vscode" "vscode" "$(field "codex-$CB" .where)"
+
+echo "== 3. Codex: третья сессия, другая задача, короткий ход"
+export DISP_NOW=2200
+ev codex "{\"session_id\":\"$CC\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Поправь цены на странице\"}" ZELLIJ=0 ZELLIJ_SESSION_NAME=main ZELLIJ_PANE_ID=7
+export DISP_NOW=2230
+before="$(wc -l <"$NOTES")"
+ev codex "{\"session_id\":\"$CC\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"Готово\"}" ZELLIJ=0 ZELLIJ_SESSION_NAME=main ZELLIJ_PANE_ID=7
+settle
+check "короткий ход (30с): без уведомления" "$before" "$(wc -l <"$NOTES")"
+check "событие без SessionStart всё равно создаёт строку" "done" "$(field "codex-$CC" .status)"
+check "ветка main не дописывается к имени" "site-31" "$(field "codex-$CC" .task)"
+
+echo "== 4. Gemini CLI: свои имена событий, stdout = JSON"
+export DISP_NOW=2300
+out="$(ev gemini "{\"session_id\":\"$GD\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"SessionStart\",\"source\":\"startup\",\"timestamp\":\"2026-11-14T10:00:00Z\"}")"
+check "Gemini: stdout = {}" "{}" "$out"
+ev gemini "{\"session_id\":\"$GD\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"BeforeAgent\",\"prompt\":\"Сгенерируй варианты заголовка\"}" >/dev/null
+check "BeforeAgent: working" "working" "$(field "gemini-$GD" .status)"
+ev gemini "{\"session_id\":\"$GD\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"Notification\",\"notification_type\":\"ToolPermission\",\"message\":\"Allow write_file?\"}" >/dev/null
+check "Notification ToolPermission: waiting" "waiting" "$(field "gemini-$GD" .status)"
+ev gemini "{\"session_id\":\"$GD\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"AfterTool\",\"tool_name\":\"write_file\"}" >/dev/null
+check "AfterTool: working" "working" "$(field "gemini-$GD" .status)"
+ev gemini "{\"session_id\":\"$GD\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"AfterAgent\",\"prompt_response\":\"Вот пять вариантов\"}" >/dev/null
+check "AfterAgent: done" "done" "$(field "gemini-$GD" .status)"
+ev gemini "{\"session_id\":\"$GD\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"SessionEnd\",\"reason\":\"exit\"}" >/dev/null
+check "SessionEnd: ended, но не принято (строгий режим по умолчанию)" "true/false" "$(field "gemini-$GD" '"\(.ended)/\(.accepted)"')"
+
+echo "== 5. Таблица"
+export DISP_NOW=2400
+tbl="$("$DISP" ls)"
+echo "$tbl" | sed 's/^/     | /'
+check "строки не шире терминала" "0" "$(echo "$tbl" | jq -R --argjson w "$COLUMNS" 'select(length > $w)' | wc -l)"
+check "при узкой панели тоже" "0" "$(COLUMNS=96 "$DISP" ls | jq -R 'select(length > 96)' | wc -l)"
+has "сводка" "ждут тебя: 1 · не принято: 3 · работают: 0 · тихо: 0" "$tbl"
+check "первой идёт ждущая сессия" "0c0de1" "$(echo "$tbl" | sed -n 3p | awk '{print $1}')"
+has "короткие ID различают сессии с общим префиксом UUIDv7" "0c0de2" "$tbl"
+has "подзадачи и фон в таблице" "1/3 ф1" "$tbl"
+has "закрытая сессия помечена" "закрыта" "$tbl"
+hasnt "без цветовых кодов вне терминала" $'\033' "$tbl"
+has "с цветом по запросу" $'\033[1;33m' "$(DISP_COLOR=1 "$DISP" ls)"
+check "--json отдаёт массив из 4 строк" "4" "$("$DISP" ls --json | jq length)"
+
+echo "== 6. Приёмка"
+"$DISP" ok 00a1b2 >/dev/null
+hasnt "принятая сессия ушла из списка" "00a1b2" "$("$DISP" ls)"
+has "но видна с -a" "[принято]" "$("$DISP" ls -a)"
+"$DISP" ok --ended >/dev/null
+hasnt "ok --ended принял закрытую" "gemini" "$("$DISP" ls)"
+"$DISP" ok site-31 >/dev/null
+hasnt "ok <задача> принимает все её сессии" "0c0de2" "$("$DISP" ls)"
+msg="$("$DISP" ok nbx-142 2>&1)"; rc=$?
+has "ok не прячет сессию, которая ждёт тебя" "пропущено (ещё ждёт тебя)" "$msg"
+has "ждущая сессия осталась в списке" "0c0de1" "$("$DISP" ls)"
+"$DISP" ok nosuch >/dev/null 2>&1
+check "ok по несуществующему id: код 1" "1" "$?"
+export DISP_NOW=2500
+ev claude "{\"session_id\":\"$CA\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Теперь залей на R2\"}" "${Z[@]}"
+has "новый промпт возвращает принятую сессию в список" "● работает" "$("$DISP" ls | grep 00a1b2)"
+check "название не перетирается следующим промптом" "Собери билд под macOS и подпиши его" "$(field "claude-$CA" .title)"
+
+msg="$("$DISP" ok 00a1b2 2>&1)"; rc=$?
+check "ok по работающей сессии: отказ" "1" "$rc"
+"$DISP" ok -f 00a1b2 >/dev/null 2>&1
+hasnt "ok -f прячет работающую" "00a1b2" "$("$DISP" ls)"
+export DISP_NOW=2520
+ev claude "{\"session_id\":\"$CA\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"Stop\"}" "${Z[@]}"
+has "завершение хода возвращает строку, даже если её спрятали" "✓ ГОТОВО" "$("$DISP" ls | grep 00a1b2)"
+ev claude "{\"session_id\":\"$CA\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Read\",\"agent_id\":\"sub-1\"}" "${Z[@]}"
+check "инструмент фонового субагента не оживляет законченный ход" "done" "$(field "claude-$CA" .status)"
+ev claude "{\"session_id\":\"$CA\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"Notification\",\"notification_type\":\"elicitation_complete\"}" "${Z[@]}"
+check "посторонние типы уведомлений статус не меняют" "done" "$(field "claude-$CA" .status)"
+ev claude "{\"session_id\":\"$CA\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Bash\"}" "${Z[@]}"
+check "свой инструмент после Stop (автопродолжение): снова working" "working" "$(field "claude-$CA" .status)"
+export DISP_NOW=2530
+
+echo "== 7. «Тихо», прерванные, show, name"
+export DISP_NOW=$((2530 + 31 * 60))
+has "working без событий 31 мин = тихо" "? тихо" "$("$DISP" ls | grep 00a1b2)"
+ev claude "{\"session_id\":\"$CA\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"SessionEnd\",\"reason\":\"other\"}" "${Z[@]}"
+has "сессия закрыта посреди работы = ПРЕРВАНА" "x ПРЕРВАНА" "$("$DISP" ls | grep 00a1b2)"
+"$DISP" name 00a1b2 "macOS-билд Nebularix" >/dev/null
+sh="$("$DISP" show 00a1b2)"
+has "show: название" "macOS-билд Nebularix" "$sh"
+has "show: последний ответ агента" "Билд готов: dist/Nebularix.dmg" "$sh"
+has "show: подзадачи" "[x] Шаг 1" "$sh"
+has "show: последний промпт" "Теперь залей на R2" "$sh"
+
+lg="$("$DISP" log 50)"
+has "журнал: ход Claude закончен" "nbx-142  работает → ГОТОВО  (zellij:main#3)" "$lg"
+has "журнал: Codex ждёт" "codex  nbx-142  работает → ЖДЁТ  (vscode)" "$lg"
+has "журнал: закрытие сессии" "→ закрыта" "$lg"
+check "журнал: только смены статуса, без дублей" "0" "$(jq -c 'select(.from == .to)' "$DISP_STATE_DIR/events.jsonl" | wc -l)"
+hasnt "в журнале нет текста промптов" "Собери билд" "$(cat "$DISP_STATE_DIR/events.jsonl")"
+
+echo "== 8. StopFailure и авто-приёмка по выходу"
+export DISP_NOW=5000
+S5="bbbbbbbb-2222-4222-8222-00000000e5e5"
+ev claude "{\"session_id\":\"$S5\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Долгая задача\"}"
+ev claude "{\"session_id\":\"$S5\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"StopFailure\",\"error\":\"rate_limit\"}"
+settle
+check "StopFailure: error" "error" "$(field "claude-$S5" .status)"
+has "StopFailure: уведомление" "⛔ site-31 · Claude: rate_limit" "$(cat "$NOTES")"
+S6="cccccccc-3333-4333-8333-00000000f6f6"
+ev claude "{\"session_id\":\"$S6\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"x\"}" DISP_AUTO_OK_ON_EXIT=1
+ev claude "{\"session_id\":\"$S6\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"Stop\"}" DISP_AUTO_OK_ON_EXIT=1
+ev claude "{\"session_id\":\"$S6\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"SessionEnd\",\"reason\":\"prompt_input_exit\"}" DISP_AUTO_OK_ON_EXIT=1
+check "DISP_AUTO_OK_ON_EXIT=1: явный выход принимает done-сессию" "true" "$(field "claude-$S6" .accepted)"
+
+echo "== 9. Устойчивость: хук никогда не мешает агенту"
+out="$(printf '' | "$DISP" hook claude)"; rc=$?
+check "пустой stdin: код 0, stdout пуст" "0/" "$rc/$out"
+out="$(printf 'это не json {{{' | "$DISP" hook codex)"; rc=$?
+check "битый JSON: код 0, stdout пуст" "0/" "$rc/$out"
+out="$(printf '[1,2,3]' | "$DISP" hook gemini)"; rc=$?
+check "JSON-массив вместо объекта: код 0, Gemini получает {}" "0/{}" "$rc/$out"
+out="$(printf '{"hook_event_name":"PreCompact","session_id":"x"}' | "$DISP" hook claude)"; rc=$?
+check "неизвестное событие: игнорируется" "0/" "$rc/$out"
+big="$(head -c 400000 /dev/zero | tr '\0' 'a')"
+out="$(printf '{"session_id":"%s","cwd":"%s","hook_event_name":"PostToolUse","tool_response":{"content":"%s"}}' "$S5" "$T/site-31" "$big" | "$DISP" hook claude)"; rc=$?
+check "payload 400 КБ: код 0" "0/" "$rc/$out"
+check "payload 400 КБ: состояние обновлено" "working" "$(field "claude-$S5" .status)"
+printf 'мусор' >"$DISP_STATE_DIR/sessions/claude-$S6.json"
+ev claude "{\"session_id\":\"$S6\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"после порчи\"}"
+check "битый файл состояния: строка пересоздана" "working" "$(field "claude-$S6" .status)"
+printf 'мусор\n' >"$DISP_STATE_DIR/sessions/zzz-broken.json"
+"$DISP" ls >/dev/null 2>&1
+check "битый чужой файл не ломает ls" "0" "$?"
+out="$(printf '{"cwd":"%s","hook_event_name":"UserPromptSubmit","prompt":"без id"}' "$T/site-31" | "$DISP" hook codex)"; rc=$?
+check "нет session_id: код 0" "0/" "$rc/$out"
+out="$(printf '{"session_id":"../../etc/x y","cwd":"/nonexistent/dir","hook_event_name":"SessionStart"}' | "$DISP" hook claude)"; rc=$?
+check "опасный session_id и несуществующий cwd: код 0" "0/" "$rc/$out"
+check "файлы состояния только внутри каталога сессий" "0" "$(find "$T" -name '*.json' -not -path "$DISP_STATE_DIR/sessions/*" | wc -l)"
+out="$(printf '{"session_id":"ro","hook_event_name":"SessionStart"}' | DISP_STATE_DIR=/proc/nope "$DISP" hook claude 2>/dev/null)"; rc=$?
+check "недоступный каталог состояния: код 0" "0/" "$rc/$out"
+mkdir -p "$T/bin"
+for t in cat mkdir date tr cut basename dirname readlink; do ln -s "$(command -v "$t")" "$T/bin/$t"; done
+# bash-версию запускаем через bash по полному пути, скомпилированную — напрямую
+RUN=("$DISP")
+[ "$(head -c 2 "$DISP")" = '#!' ] && RUN=("$(command -v bash)" "$DISP")
+out="$(printf '{"session_id":"nojq","hook_event_name":"SessionStart"}' | PATH="$T/bin" "${RUN[@]}" hook gemini 2>/dev/null)"; rc=$?
+check "нет jq в PATH: код 0, Gemini получает {}" "0/{}" "$rc/$out"
+
+echo "== 10. Параллельные события одной сессии (flock)"
+export DISP_NOW=6000
+S7="dddddddd-4444-4444-8444-0000000a7a7a"
+ev claude "{\"session_id\":\"$S7\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"много подзадач\"}"
+for i in $(seq 1 30); do
+  ev claude "{\"session_id\":\"$S7\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"TaskCreated\",\"task_id\":\"t$i\",\"task_subject\":\"п$i\"}" &
+done
+wait
+check "30 одновременных TaskCreated: ничего не потеряно" "30" "$(field "claude-$S7" '.subtasks | length')"
+
+echo "== 11. Codex: прерывание хода (Interrupt) и конец сессии (SessionEnd)"
+export DISP_NOW=6500
+S9="019a0000-0000-7000-8000-0000000c9c9c"
+ev codex "{\"session_id\":\"$S9\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Долгий рефакторинг\"}"
+before="$(wc -l <"$NOTES")"
+export DISP_NOW=6900
+out="$(ev codex "{\"session_id\":\"$S9\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"Interrupt\",\"turn_id\":\"t1\"}")"
+settle
+check "Interrupt: stdout пуст (простой текст для Codex здесь недопустим)" "" "$out"
+check "Interrupt: активный ход снят с «работает», но не принят" "done/ход прерван/false" "$(field "codex-$S9" '"\(.status)/\(.detail)/\(.accepted)"')"
+check "Interrupt: без уведомления (ты сам у клавиатуры)" "$before" "$(wc -l <"$NOTES")"
+has "прерванный ход остаётся в списке с пометкой" "ход прерван · Долгий рефакторинг" "$("$DISP" ls | grep 0c9c9c)"
+ev codex "{\"session_id\":\"$S9\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"Interrupt\",\"turn_id\":\"t1\"}"
+check "повторный Interrupt вне хода ничего не меняет" "6900" "$(field "codex-$S9" .done_at)"
+ev codex "{\"session_id\":\"$S9\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"SessionEnd\",\"reason\":\"exit\"}"
+check "Codex SessionEnd: сессия закрыта, строка не принята" "true/false" "$(field "codex-$S9" '"\(.ended)/\(.accepted)"')"
+check "config codex: подключены Interrupt и SessionEnd" "true" "$("$DISP" config codex | jq '.hooks | has("Interrupt") and has("SessionEnd")')"
+check "config codex: таймаут Interrupt и SessionEnd не больше 3 с (предел Codex)" "3" "$("$DISP" config codex | jq '[.hooks.Interrupt[0].hooks[0].timeout, .hooks.SessionEnd[0].hooks[0].timeout] | max')"
+
+echo "== 12. Название сессии от самого агента"
+export DISP_NOW=6950
+SA="ffffffff-6666-4666-8666-0000000d1d1d"
+TR="$T/tr-a.jsonl"
+printf '%s\n' '{"type":"user","message":"x"}' '{"type":"ai-title","aiTitle":"Сборка и подпись macOS-билда","sessionId":"x"}' >"$TR"
+ev claude "{\"session_id\":\"$SA\",\"cwd\":\"$T/nbx-142\",\"transcript_path\":\"$TR\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"ну давай, собери уже как-нибудь\"}"
+check "Claude: название из ai-title транскрипта, а не из промпта" "Сборка и подпись macOS-билда" "$(field "claude-$SA" .title)"
+printf '%s\n' '{"type":"custom-title","customTitle":"Релиз 1.4 \"mac\"","sessionId":"x"}' '{"type":"ai-title","aiTitle":"Сборка и подпись macOS-билда","sessionId":"x"}' >>"$TR"
+ev claude "{\"session_id\":\"$SA\",\"cwd\":\"$T/nbx-142\",\"transcript_path\":\"$TR\",\"hook_event_name\":\"Stop\"}"
+check "Claude: /rename (custom-title) важнее ai-title" 'Релиз 1.4 "mac"' "$(field "claude-$SA" .title)"
+"$DISP" name 0d1d1d "жду билд из CI" >/dev/null
+ev claude "{\"session_id\":\"$SA\",\"cwd\":\"$T/nbx-142\",\"transcript_path\":\"$TR\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"ещё раз\"}"
+ev claude "{\"session_id\":\"$SA\",\"cwd\":\"$T/nbx-142\",\"transcript_path\":\"$TR\",\"hook_event_name\":\"Stop\"}"
+check "название, заданное через disp name, агент не перетирает" "жду билд из CI" "$(field "claude-$SA" .title)"
+SB="ffffffff-6666-4666-8666-0000000d2d2d"
+TRB="$T/tr-b.jsonl"
+printf '%s\n' '{"type":"user","message":"x"}' >"$TRB"
+ev claude "{\"session_id\":\"$SB\",\"cwd\":\"$T/nbx-142\",\"transcript_path\":\"$TRB\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Обнови зависимости\"}"
+check "названия в транскрипте ещё нет: показываем первый промпт" "Обнови зависимости" "$(field "claude-$SB" .title)"
+printf '%s\n' '{"type":"ai-title","aiTitle":"Обновление зависимостей","sessionId":"x"}' >>"$TRB"
+ev claude "{\"session_id\":\"$SB\",\"cwd\":\"$T/nbx-142\",\"transcript_path\":\"$TRB\",\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Bash\"}"
+check "название появилось посреди хода: подхватывается на событии инструмента" "Обновление зависимостей" "$(field "claude-$SB" .title)"
+mkdir -p "$T/fakezj"
+cat >"$T/fakezj/zellij" <<'EOF'
+#!/usr/bin/env bash
+printf 'PANE_ID  TYPE  TITLE\nterminal_7  terminal  ⠙ Починить импорт цен | site-31\nterminal_8  terminal  rock@host:~/projects\n'
+EOF
+chmod +x "$T/fakezj/zellij"
+SC="019a0000-0000-7000-8000-0000000d3d3d"
+ev codex "{\"session_id\":\"$SC\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"глянь, что там\"}" ZELLIJ=0 ZELLIJ_SESSION_NAME=main ZELLIJ_PANE_ID=7 DISP_PANE_TITLE=1 PATH="$T/fakezj:$PATH"
+check "Codex: название из заголовка панели zellij, без спиннера и имени проекта" "Починить импорт цен" "$(field "codex-$SC" .title)"
+SD="019a0000-0000-7000-8000-0000000d4d4d"
+ev codex "{\"session_id\":\"$SD\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"глянь, что там\"}" ZELLIJ=0 ZELLIJ_SESSION_NAME=main ZELLIJ_PANE_ID=8 DISP_PANE_TITLE=1 PATH="$T/fakezj:$PATH"
+check "заголовок оболочки (user@host:путь) названием не считается" "глянь, что там" "$(field "codex-$SD" .title)"
+
+echo "== 13. Настройки, права, config, gc, doctor"
+printf '# комментарий\nDISP_NOTIFY_MIN_SEC=5\nEVIL=$(touch %s/pwned)\nDISP_STALE_MIN="1"\n' "$T" >"$DISP_CONFIG"
+export DISP_NOW=7000
+S8="eeeeeeee-5555-4555-8555-0000000b8b8b"
+ev claude "{\"session_id\":\"$S8\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"порог из файла\"}"
+export DISP_NOW=7010
+ev claude "{\"session_id\":\"$S8\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"Stop\"}"
+settle
+has "порог уведомления читается из файла настроек" "закончил ход (10с)" "$(tail -n 1 "$NOTES")"
+check "файл настроек не исполняется как shell" "нет" "$([ -e "$T/pwned" ] && echo да || echo нет)"
+check "файлы состояния закрыты от чужих (600)" "600" "$(stat -c %a "$DISP_STATE_DIR/sessions/claude-$S8.json")"
+for a in claude codex gemini; do
+  "$DISP" config "$a" | jq -e '.hooks | length > 0' >/dev/null 2>&1
+  check "config $a: валидный JSON" "0" "$?"
+done
+has "config: абсолютный путь к скрипту" "$(readlink -f "$DISP") hook codex" "$("$DISP" config codex)"
+CS="$T/agent-conf/settings.json"
+mkdir -p "$T/agent-conf"
+printf '{"model":"x","hooks":{"Stop":[{"hooks":[{"type":"command","command":"/usr/bin/true"}]}]}}\n' >"$CS"
+DISP_CLAUDE_SETTINGS="$CS" "$DISP" install claude >/dev/null
+check "install: чужой хук и остальные ключи сохранены, наш добавлен" "2/x/12" "$(jq -r '"\(.hooks.Stop | length)/\(.model)/\(.hooks | length)"' "$CS")"
+check "install: копия прежнего файла" "1" "$(jq '.hooks.Stop | length' "$CS.bak-disp")"
+has "install: повторный запуск сообщает, что менять нечего" "изменений нет" "$(DISP_CLAUDE_SETTINGS="$CS" "$DISP" install claude)"
+check "install: повторный запуск ничего не дублирует" "2" "$(jq '.hooks.Stop | length' "$CS")"
+DISP_CODEX_HOOKS="$T/agent-conf/new/hooks.json" "$DISP" install codex >/dev/null
+check "install: если файла нет, он создаётся" "9" "$(jq '.hooks | length' "$T/agent-conf/new/hooks.json")"
+printf 'не json' >"$CS"
+DISP_CLAUDE_SETTINGS="$CS" "$DISP" install claude >/dev/null 2>&1
+check "install: битый файл настроек не тронут, код 1" "1/не json" "$?/$(cat "$CS")"
+export DISP_NOW=$((7010 + 8 * 86400))
+"$DISP" gc 7 >/dev/null
+check "gc удалил принятые старше 7 дней" "0" "$("$DISP" ls --json | jq '[.[] | select(.accepted)] | length')"
+has "gc не трогает непринятые" "порог из файла" "$("$DISP" ls -a)"
+has "doctor видит события агентов" "claude" "$("$DISP" doctor)"
+echo "     hook.log:"; sed 's/^/     | /' "$DISP_STATE_DIR/hook.log" 2>/dev/null
+check "в hook.log нет ошибок самого скрипта" "0" "$(grep -Ec 'unbound variable|syntax error|command not found|compile error' "$DISP_STATE_DIR/hook.log" 2>/dev/null | head -n 1)"
+
+echo
+echo "итого: ok=$pass fail=$fail"
+rm -rf "$T"
+[ "$fail" -eq 0 ]
+```
