@@ -5,6 +5,7 @@ DISP="${1:-$(dirname "$(readlink -f "$0")")/disp}"
 T="$(mktemp -d)"
 export DISP_STATE_DIR="$T/state" DISP_CONFIG="$T/env" DISP_DESKTOP=0 DISP_COLOR=0 COLUMNS=140
 export DISP_PANE_TITLE=0   # настоящий zellij в тестах не опрашиваем; раздел 12 подставляет свой
+export DISP_CONTAINERS=0   # агенты в контейнерах этой машины в тестовый список не попадают
 export XDG_STATE_HOME="$T/xdg"
 NOTES="$T/notes.log"
 cat >"$T/notify.sh" <<EOF

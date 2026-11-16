@@ -15,11 +15,12 @@ use serde_json::Value;
 
 use crate::VERSION;
 use crate::board::{self, Accepted, Board, Counts, Row, or_question, status_name};
-use crate::config::env_nonempty;
+use crate::config::{Paths, env_nonempty};
 use crate::detect::{self, which};
 use crate::model::Status;
+use crate::observe;
 use crate::panes;
-use crate::store;
+use crate::store::{self, Store};
 use crate::text::{age, clip, emit, local_time, pad, warn};
 
 /// Суммарная ширина всех колонок таблицы, кроме последней («ЧТО»).
@@ -29,6 +30,8 @@ const JOURNAL_KEEP: usize = 5000;
 
 /// `disp ls [-a] [--json]`: таблица незакрытых сессий.
 pub fn ls(args: &[String]) -> u8 {
+    // Сначала — что изменилось у агентов в контейнерах: хуков у них нет.
+    observe::sync(&Store::new(Paths::from_env()));
     let board = Board::load();
     let mut all = false;
     for arg in args {
@@ -138,7 +141,9 @@ pub fn watch_plain(pause: Duration) -> u8 {
         std::process::exit(0);
     });
     emit("\x1b[?25l");
+    let watched = Store::new(Paths::from_env());
     loop {
+        observe::sync(&watched);
         let board = Board::load();
         let table = table(&board, term_cols(), false, true);
         let frame = format!(

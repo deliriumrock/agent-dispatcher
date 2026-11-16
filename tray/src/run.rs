@@ -11,6 +11,7 @@ use std::time::Duration;
 use disp::board::Board;
 use disp::config;
 use disp::notify;
+use disp::observe;
 use disp::store::{self, Signature, Store};
 use tray_icon::menu::MenuEvent;
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -89,6 +90,8 @@ impl App {
     /// Перечитывает сессии, если изменился их каталог или пришло время, и обновляет
     /// значок, если изменилось то, что он показывает.
     pub fn refresh(&mut self) {
+        // Агенты в контейнерах: перемены у них попадают в файлы сессий, как от хуков.
+        observe::sync(&self.store);
         if self.seen.as_ref() == Some(&self.stamp()) {
             return;
         }

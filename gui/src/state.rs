@@ -8,9 +8,10 @@ use std::time::SystemTime;
 use chrono::Local;
 use disp::board::{self, Accepted, Board, Counts, Row, Sort, Tone, short_place};
 use disp::config::{self, Paths};
+use disp::observe;
 use disp::model::View;
 use disp::panes;
-use disp::store::{self, Signature};
+use disp::store::{self, Signature, Store};
 use disp::text::{age, latin_key};
 use disp::timeline::{History, Window, span_label};
 use slint::{ModelRc, SharedString, VecModel};
@@ -156,6 +157,8 @@ impl State {
     /// Перечитывает сессии, если изменился их каталог, истекло сообщение или пришло время
     /// обновить возрасты. Возвращает, было ли что перечитывать.
     pub fn refresh(&mut self) -> bool {
+        // Агенты в контейнерах: перемены у них попадают в файлы сессий, как от хуков.
+        observe::sync(&Store::new(self.paths.clone()));
         let now = config::now();
         let expired = self
             .notice

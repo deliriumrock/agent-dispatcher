@@ -54,6 +54,18 @@ impl FakeProc {
         assert!(fs::write(dir.join("environ"), env.join("\0") + "\0").is_ok());
         assert!(std::os::unix::fs::symlink(cwd, dir.join("cwd")).is_ok());
     }
+
+    /// Помещает процесс `pid` в контейнер: своё пространство имён файловой системы `mnt`
+    /// (`mnt:[…]`), cgroup `cgroup`, номер `ns_pid` внутри контейнера и корень его
+    /// файловой системы `fs_root`.
+    pub fn contain(&self, pid: u32, mnt: &str, cgroup: &str, ns_pid: u32, fs_root: &Path) {
+        let dir = self.root.join(pid.to_string());
+        assert!(fs::create_dir_all(dir.join("ns")).is_ok());
+        assert!(std::os::unix::fs::symlink(mnt, dir.join("ns/mnt")).is_ok());
+        assert!(fs::write(dir.join("cgroup"), format!("0::{cgroup}\n")).is_ok());
+        assert!(fs::write(dir.join("status"), format!("Name:\tx\nNSpid:\t{pid}\t{ns_pid}\n")).is_ok());
+        assert!(std::os::unix::fs::symlink(fs_root, dir.join("root")).is_ok());
+    }
 }
 
 impl Drop for FakeProc {

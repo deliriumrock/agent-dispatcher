@@ -21,6 +21,7 @@ pub mod hook;
 pub mod install;
 pub mod model;
 pub mod notify;
+pub mod observe;
 pub mod panes;
 pub mod procs;
 pub mod store;

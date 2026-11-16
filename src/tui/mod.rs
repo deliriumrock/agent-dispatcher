@@ -28,7 +28,8 @@ use crate::cli;
 use crate::config::{self, Paths, Settings};
 use crate::error::Result;
 use crate::panes;
-use crate::store::{self, Signature};
+use crate::observe;
+use crate::store::{self, Signature, Store};
 use crate::text::warn;
 use crate::timeline::History;
 
@@ -160,7 +161,11 @@ fn event_loop(
     let mut history_seen: Option<Option<(SystemTime, u64)>> = None;
     let mut reload = true;
     let mut redraw = true;
+    let watched = Store::new(paths.clone());
     while !stop.load(Ordering::Relaxed) {
+        // Агенты в контейнерах: перемены у них записываются в файлы сессий, и панель
+        // видит их, как события хуков.
+        observe::sync(&watched);
         let stamp = (store::dir_signature(&paths.sessions), config::now());
         if reload || seen.as_ref() != Some(&stamp) {
             let board = Board::load();
