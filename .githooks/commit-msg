@@ -1,0 +1,20 @@
+#!/bin/sh
+
+message_file="$1"
+subject="$(sed -n '1p' "$message_file")"
+
+case "$subject" in
+  "[FEAT] "*|"[FIX] "*|"[REFACTOR] "*|"[DOCS] "*|"[TEST] "*|"[PERF] "*|"[CHORE] "*)
+    exit 0
+    ;;
+esac
+
+cat >&2 <<'EOF'
+Invalid commit message.
+
+Expected: [TYPE] Short English description
+Allowed local types: FEAT, FIX, REFACTOR, DOCS, TEST, PERF, CHORE
+[PR] is reserved for server-side merge commits.
+EOF
+
+exit 1
