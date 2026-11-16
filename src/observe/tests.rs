@@ -307,6 +307,7 @@ fn claude_seen(root: &Path, sid: &str, state: State) -> Seen {
         cwd: "/app".to_string(),
         container: ID[..12].to_string(),
         state,
+        activity: None,
         access: Access::Root(root.to_path_buf()),
         log: claude_log("/home/dev/.claude", "/app", sid),
     }
@@ -422,4 +423,116 @@ fn sessions_kept_by_hooks_are_left_alone() {
         (session.status, session.ended, session.updated),
         (Status::Working, false, 1000)
     );
+}
+
+#[test]
+fn words_in_message_text_are_not_turn_events() {
+    let dir = Dir::new("event-text");
+    let rollout = dir.write(
+        "r.jsonl",
+        concat!(
+            r#"{"type":"session_meta","payload":{"id":"x","source":"cli"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"task_started"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"agent_message","message":"Checking task_complete handling."}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(codex_state(&rollout), State::Busy);
+}
+
+#[test]
+fn unreadable_namespace_makes_the_container_blind() {
+    let proc = FakeProc::new("observe-ns");
+    let fs_root = Dir::new("ns-root");
+    let other = format!("{:0>64}", "cd");
+    proc.add_at(400, 1, &["/opt/codex"], "/", &["HOME=/root"], 100);
+    proc.contain(400, "mnt:[5]", &format!("/system.slice/docker-{other}.scope"), 7, &fs_root.0);
+    // Агент другого пользователя: `ns/mnt` не прочитать.
+    let ns = proc.root.join("400/ns");
+    assert!(fs::set_permissions(&ns, fs::Permissions::from_mode(0o000)).is_ok());
+    let denied = fs::read_link(ns.join("mnt"))
+        .is_err_and(|err| err.kind() == ErrorKind::PermissionDenied);
+    let look = scan(&Procs::scan_in(&proc.root, 100), "mnt:[1]");
+    assert!(fs::set_permissions(&ns, fs::Permissions::from_mode(0o755)).is_ok());
+    // Под root права не мешают читать: проверять нечего.
+    if denied {
+        assert_eq!(look.blind, HashSet::from([other[..12].to_string()]));
+        assert!(!look.covers(&other[..12]));
+    }
+}
+
+#[test]
+fn resumed_sessions_are_found_in_old_day_directories() {
+    let dir = Dir::new("resumed");
+    let meta = |id: &str| {
+        format!(
+            "{}\n{}\n",
+            format_args!(r#"{{"type":"session_meta","payload":{{"id":"{id}","cwd":"/w","source":"cli"}}}}"#),
+            r#"{"type":"event_msg","payload":{"type":"task_started"}}"#
+        )
+    };
+    // Сессию создали год назад и продолжили сейчас; соседнюю не трогали.
+    dir.write("home/dev/.codex/sessions/2025/11/01/rollout-2025-11-01T10-00-00-old1.jsonl", &meta("old1"));
+    let idle = dir.write(
+        "home/dev/.codex/sessions/2025/11/01/rollout-2025-11-01T11-00-00-old2.jsonl",
+        &meta("old2"),
+    );
+    let year_ago = SystemTime::now() - Duration::from_secs(365 * 86_400);
+    assert!(File::options().write(true).open(&idle).is_ok_and(|file| file.set_modified(year_ago).is_ok()));
+    let seen = codex_sessions(&dir.0, "/home/dev/.codex", config::now() - 60, &ID[..12]);
+    let sids: Vec<&str> = seen.iter().map(|one| one.sid.as_str()).collect();
+    assert_eq!(sids, ["old1"]);
+    assert_eq!(seen[0].state, State::Busy);
+}
+
+#[test]
+fn codex_turns_stay_alive_only_while_the_rollout_grows() {
+    let dir = Dir::new("codex-alive");
+    let (store, settings) = store_in(&dir);
+    let look = |activity: i64| {
+        everywhere(vec![Seen {
+            agent: "codex",
+            sid: "c1".to_string(),
+            cwd: "/app".to_string(),
+            container: ID[..12].to_string(),
+            state: State::Busy,
+            activity: Some(activity),
+            access: Access::Root(dir.0.clone()),
+            log: Log::Codex {
+                rollout: "/none.jsonl".to_string(),
+                index: "/none-index.jsonl".to_string(),
+            },
+        }])
+    };
+    let updated = || {
+        store::read_session(&store.session_file("codex", "c1"))
+            .unwrap_or_default()
+            .updated
+    };
+    assert_eq!(apply(&store, &settings, &look(1000), 1000), 1);
+    // Журнал не пишется, хотя процесс Codex в контейнере жив: агент этой сессии мог
+    // пропасть, и время не продлевается — через `DISP_STALE_MIN` она станет молчащей.
+    assert_eq!(apply(&store, &settings, &look(1000), 5000), 0);
+    assert_eq!(updated(), 1000);
+    // Журнал снова пишется — ход жив.
+    assert_eq!(apply(&store, &settings, &look(4900), 5000), 1);
+    assert_eq!(updated(), 4900);
+}
+
+#[test]
+fn half_written_session_meta_is_read_again() {
+    let dir = Dir::new("meta-retry");
+    let rollout = dir.0.join("rollout-x.jsonl");
+    assert!(fs::write(&rollout, r#"{"type":"session_meta","payl"#).is_ok());
+    assert!(codex_meta(&rollout).is_none());
+    assert!(
+        fs::write(
+            &rollout,
+            concat!(r#"{"type":"session_meta","payload":{"id":"x1","cwd":"/w","source":"cli"}}"#, "\n")
+        )
+        .is_ok()
+    );
+    assert_eq!(codex_meta(&rollout).map(|meta| meta.sid), Some("x1".to_string()));
 }

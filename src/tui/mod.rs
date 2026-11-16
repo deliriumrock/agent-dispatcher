@@ -161,11 +161,10 @@ fn event_loop(
     let mut history_seen: Option<Option<(SystemTime, u64)>> = None;
     let mut reload = true;
     let mut redraw = true;
-    let watched = Store::new(paths.clone());
+    // Агенты в контейнерах: фоновый поток записывает перемены у них в файлы сессий,
+    // и панель видит их, как события хуков, не дожидаясь `docker exec`.
+    observe::watch(Store::new(paths.clone()));
     while !stop.load(Ordering::Relaxed) {
-        // Агенты в контейнерах: перемены у них записываются в файлы сессий, и панель
-        // видит их, как события хуков.
-        observe::sync(&watched);
         let stamp = (store::dir_signature(&paths.sessions), config::now());
         if reload || seen.as_ref() != Some(&stamp) {
             let board = Board::load();

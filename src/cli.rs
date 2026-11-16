@@ -141,9 +141,8 @@ pub fn watch_plain(pause: Duration) -> u8 {
         std::process::exit(0);
     });
     emit("\x1b[?25l");
-    let watched = Store::new(Paths::from_env());
+    observe::watch(Store::new(Paths::from_env()));
     loop {
-        observe::sync(&watched);
         let board = Board::load();
         let table = table(&board, term_cols(), false, true);
         let frame = format!(

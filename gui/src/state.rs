@@ -117,7 +117,11 @@ impl State {
     /// Состояние по файлам диспетчера. Заодно исправляет записи прежних версий.
     pub fn new() -> Self {
         board::repair_roots(&Board::load());
-        State::empty(Paths::from_env())
+        let paths = Paths::from_env();
+        // Агенты в контейнерах: фоновый поток записывает перемены у них в файлы сессий,
+        // а окно видит их, как события хуков, не дожидаясь `docker exec`.
+        observe::watch(Store::new(paths.clone()));
+        State::empty(paths)
     }
 
     fn empty(paths: Paths) -> Self {
@@ -157,8 +161,6 @@ impl State {
     /// Перечитывает сессии, если изменился их каталог, истекло сообщение или пришло время
     /// обновить возрасты. Возвращает, было ли что перечитывать.
     pub fn refresh(&mut self) -> bool {
-        // Агенты в контейнерах: перемены у них попадают в файлы сессий, как от хуков.
-        observe::sync(&Store::new(self.paths.clone()));
         let now = config::now();
         let expired = self
             .notice

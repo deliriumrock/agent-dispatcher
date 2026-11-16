@@ -25,12 +25,12 @@ mod exec;
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, OnceLock};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use chrono::{DateTime, Datelike};
 use serde_json::{Map, Value};
 
 use crate::config::{self, Settings};
@@ -54,6 +54,8 @@ const TOUCH_SEC: i64 = 60;
 const TAIL_BYTES: u64 = 2 * 1024 * 1024;
 /// Сколько байт с конца списка сессий Codex читать в поисках названия.
 const INDEX_BYTES: u64 = 256 * 1024;
+/// События журнала Codex, которые отмечают границы хода.
+const TURN_EVENTS: [&str; 3] = ["task_started", "task_complete", "turn_aborted"];
 /// Префиксы cgroup, по которым узнаётся контейнер: Docker, Podman, containerd, CRI-O.
 const ENGINES: [&str; 4] = ["docker-", "libpod-", "cri-containerd-", "crio-"];
 
@@ -100,6 +102,10 @@ pub struct Seen {
     pub container: String,
     /// Что агент делает.
     pub state: State,
+    /// Когда агент последний раз писал журнал сессии, unix-секунды. У Codex только это
+    /// и говорит, что ход ещё идёт: журнал не связан с процессом. `None` — за сессией
+    /// стоит проверенный процесс (Claude Code).
+    pub activity: Option<i64>,
     access: Access,
     log: Log,
 }
@@ -133,6 +139,24 @@ impl Look {
     fn covers(&self, container: &str) -> bool {
         self.inspected.contains(container) || (self.everywhere && !self.blind.contains(container))
     }
+}
+
+/// Смотрит в контейнеры в фоновом потоке, пока жив процесс: значок, панель и окно
+/// не ждут `docker exec`, а перемены видят по файлам сессий, как от хуков. Поток один
+/// на процесс, повторные вызовы ничего не делают.
+pub fn watch(store: Store) {
+    static STARTED: OnceLock<()> = OnceLock::new();
+    if STARTED.set(()).is_err() {
+        return;
+    }
+    let _ = thread::Builder::new()
+        .name("disp-observe".to_string())
+        .spawn(move || {
+            loop {
+                sync(&store);
+                thread::sleep(EVERY);
+            }
+        });
 }
 
 /// Сверяет сессии в контейнерах с файлами диспетчера: перемены записывает и рассылает
@@ -213,12 +237,7 @@ pub fn scan(procs: &Procs, own_mnt: &str) -> Look {
             continue;
         }
         let dir = procs.dir(proc.pid);
-        let Ok(mnt) = fs::read_link(dir.join("ns/mnt")) else {
-            continue;
-        };
-        if mnt.as_os_str() == own_mnt {
-            continue;
-        }
+        // cgroup читается у любого процесса, поэтому контейнер узнаём по ней первой.
         let Some(container) = fs::read_to_string(dir.join("cgroup"))
             .ok()
             .as_deref()
@@ -226,8 +245,18 @@ pub fn scan(procs: &Procs, own_mnt: &str) -> Look {
         else {
             continue;
         };
+        match fs::read_link(dir.join("ns/mnt")) {
+            Ok(mnt) if mnt.as_os_str() == own_mnt => continue,
+            Ok(_) => {}
+            // Агент другого пользователя: о нём ничего не известно, но он есть.
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                look.blind.insert(container);
+                continue;
+            }
+            // Процесс успел завершиться.
+            Err(_) => continue,
+        }
         let root = dir.join("root");
-        // Агент другого пользователя: ни окружения, ни файлов не прочитать.
         if fs::read(dir.join("environ")).is_err() || fs::read_dir(&root).is_err() {
             look.blind.insert(container);
             continue;
@@ -257,6 +286,7 @@ pub fn scan(procs: &Procs, own_mnt: &str) -> Look {
                 cwd,
                 container,
                 state,
+                activity: None,
                 access: Access::Root(root),
             });
         } else {
@@ -370,6 +400,7 @@ fn codex_sessions(root: &Path, home: &str, since: i64, container: &str) -> Vec<S
                 cwd: meta.cwd,
                 container: container.to_string(),
                 state,
+                activity: modified(&rollout),
                 access: Access::Root(root.to_path_buf()),
                 log: Log::Codex {
                     rollout: format!("/{inner}"),
@@ -381,11 +412,9 @@ fn codex_sessions(root: &Path, home: &str, since: i64, container: &str) -> Vec<S
 }
 
 /// Журналы сессий Codex (`<sessions>/ГГГГ/ММ/ДД/rollout-*.jsonl`), изменённые с `since`.
+/// Смотрятся все дни: каталог назван по дню создания сессии, а продолжить можно и
+/// давнюю.
 fn rollouts(sessions: &Path, since: i64) -> Vec<PathBuf> {
-    // Каталоги дней названы по UTC; день до запуска берётся с запасом.
-    let first = DateTime::from_timestamp(since - 86_400, 0)
-        .map(|at| (at.year(), at.month(), at.day()))
-        .unwrap_or_default();
     let since_time = UNIX_EPOCH + Duration::from_secs(u64::try_from(since).unwrap_or(0));
     let numbered = |dir: &Path| -> Vec<(u32, PathBuf)> {
         fs::read_dir(dir)
@@ -401,13 +430,9 @@ fn rollouts(sessions: &Path, since: i64) -> Vec<PathBuf> {
             .unwrap_or_default()
     };
     let mut found = Vec::new();
-    for (year, year_dir) in numbered(sessions) {
-        for (month, month_dir) in numbered(&year_dir) {
-            for (day, day_dir) in numbered(&month_dir) {
-                let date = (i32::try_from(year).unwrap_or(0), month, day);
-                if date < first {
-                    continue;
-                }
+    for (_, year_dir) in numbered(sessions) {
+        for (_, month_dir) in numbered(&year_dir) {
+            for (_, day_dir) in numbered(&month_dir) {
                 let Ok(files) = fs::read_dir(&day_dir) else {
                     continue;
                 };
@@ -427,6 +452,12 @@ fn rollouts(sessions: &Path, since: i64) -> Vec<PathBuf> {
     }
     found.sort();
     found
+}
+
+/// Время изменения файла, unix-секунды.
+fn modified(path: &Path) -> Option<i64> {
+    let time = fs::metadata(path).ok()?.modified().ok()?;
+    i64::try_from(time.duration_since(UNIX_EPOCH).ok()?.as_secs()).ok()
 }
 
 /// Первая строка журнала Codex: номер и каталог сессии.
@@ -449,7 +480,9 @@ fn codex_meta(rollout: &Path) -> Option<Meta> {
     BufReader::new(File::open(rollout).ok()?)
         .read_line(&mut line)
         .ok()?;
-    let meta = serde_json::from_str::<Value>(&line).ok().and_then(|first| {
+    // Первая строка ещё не дописана: сессия только создаётся, посмотрим в следующий раз.
+    let first = serde_json::from_str::<Value>(&line).ok()?;
+    let meta = (|| {
         let payload = first.get("payload")?;
         let user = first.get("type")? == "session_meta" && payload.get("source")?.is_string();
         let sid = hook::sanitize(payload.get("id")?.as_str()?);
@@ -461,7 +494,7 @@ fn codex_meta(rollout: &Path) -> Option<Meta> {
                 .unwrap_or_default()
                 .to_string(),
         })
-    });
+    })();
     if let Ok(mut cache) = CACHE.lock() {
         cache.insert(rollout.to_path_buf(), meta.clone());
     }
@@ -487,11 +520,14 @@ fn codex_state(rollout: &Path) -> State {
         return state;
     }
     let (lines, whole) = tail_lines(rollout, TAIL_BYTES);
+    // Слова могут встретиться и в тексте сообщения: событием считается только тип.
     let last = lines.iter().rev().find_map(|line| {
-        ["task_started", "task_complete", "turn_aborted"]
-            .into_iter()
-            .find(|kind| line.contains(kind))
-            .and_then(|_| event_kind(line))
+        TURN_EVENTS
+            .iter()
+            .any(|kind| line.contains(kind))
+            .then(|| event_kind(line))
+            .flatten()
+            .filter(|kind| TURN_EVENTS.contains(&kind.as_str()))
     });
     let state = turn_state(last.as_deref(), whole);
     if let (Some(stamp), Ok(mut cache)) = (stamp, CACHE.lock()) {
@@ -795,7 +831,7 @@ fn update(store: &Store, settings: &Settings, seen: &Seen, now: i64) -> Result<b
         return Ok(false);
     }
     let Some(planned) = action_for(before.as_ref(), &seen.state) else {
-        return touch(store, &file, before.as_ref(), &seen.state, now);
+        return touch(store, &file, before.as_ref(), seen, now);
     };
     // Транскрипт и git читаем до блокировки: это самое долгое.
     let details = seen.details();
@@ -849,24 +885,27 @@ fn update(store: &Store, settings: &Settings, seen: &Seen, now: i64) -> Result<b
 }
 
 /// Работающей сессии обновляет время раз в `TOUCH_SEC`: агент занят, хотя перемен нет.
+/// Сессия Codex живёт, пока пишется её журнал: время берётся по нему, и сессия, чей
+/// агент пропал, со временем становится молчащей, а не работает вечно.
 fn touch(
     store: &Store,
     file: &Path,
     before: Option<&Session>,
-    state: &State,
+    seen: &Seen,
     now: i64,
 ) -> Result<bool> {
+    let alive = seen.activity.unwrap_or(now).min(now);
     let stale = |session: &Session| {
-        session.status == Status::Working && now - session.updated >= TOUCH_SEC
+        session.status == Status::Working && alive - session.updated >= TOUCH_SEC
     };
-    if *state != State::Busy || !before.is_some_and(stale) {
+    if seen.state != State::Busy || !before.is_some_and(stale) {
         return Ok(false);
     }
     let _lock = store.lock();
     let Some(mut session) = store::read_session(file).filter(stale) else {
         return Ok(false);
     };
-    session.updated = now;
+    session.updated = alive;
     store::write_session(file, &session)?;
     Ok(true)
 }

@@ -14,8 +14,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::{
-    Access, Details, Log, Look, Seen, TAIL_BYTES, claude_details, claude_file, claude_log,
-    codex_details, turn_state,
+    Access, Details, Log, Look, Seen, TAIL_BYTES, TURN_EVENTS, claude_details, claude_file,
+    claude_log, codex_details, turn_state,
 };
 use crate::detect::{self, which};
 use crate::hook;
@@ -29,8 +29,10 @@ const PART: &str = "\n\u{1e}\n";
 /// Сценарий взгляда: агенты в `/proc` контейнера и их файлы. Печатает строки через табуляцию:
 ///
 /// - `C <время запуска> <каталог Claude> <файл sessions/<pid>.json одной строкой>`;
-/// - `R <каталог Codex> <журнал> <размер> <"id":…> <"cwd":…> <"source":…> <последнее
-///   событие хода>` — для журналов, изменённых с запуска процесса Codex.
+/// - `R <каталог Codex> <журнал> <время изменения> <размер> <"id":…> <"cwd":…>
+///   <"source":…> <последнее событие хода>` — для журналов, изменённых с запуска
+///   процесса Codex. Событие ищется как `"type":"…"`: упоминание в тексте сообщения
+///   записано с экранированными кавычками и под образец не подходит.
 const SCAN: &str = r#"
 tck=$(getconf CLK_TCK 2>/dev/null) || tck=100
 [ -n "$tck" ] || tck=100
@@ -64,7 +66,7 @@ for d in /proc/[0-9]*; do
       src=$(printf '%s' "$first" | grep -o '"source":[^,}]*' | head -n 1)
       size=$(stat -c %s "$f" 2>/dev/null)
       last=$(tail -c 2097152 "$f" | grep -oE '"type":"(task_started|task_complete|turn_aborted)"' | tail -n 1)
-      printf 'R\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$ch" "$f" "$size" "$id" "$cwd" "$src" "$last"
+      printf 'R\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$ch" "$f" "$m" "$size" "$id" "$cwd" "$src" "$last"
     done
   fi
 done
@@ -127,12 +129,13 @@ pub(super) fn inspect(engine: &Path, container: &str) -> Option<Vec<Seen>> {
 
 /// Разбирает строки сценария взгляда.
 fn parse_scan(output: &str, engine: &Path, container: &str) -> Vec<Seen> {
-    let seen = |agent, sid, cwd, state, log| Seen {
+    let seen = |agent, sid, cwd, state, activity, log| Seen {
         agent,
         sid,
         cwd,
         container: container.to_string(),
         state,
+        activity,
         access: Access::Exec(engine.to_path_buf()),
         log,
     };
@@ -144,9 +147,9 @@ fn parse_scan(output: &str, engine: &Path, container: &str) -> Vec<Seen> {
                 ["C", start, config, file] => {
                     let (sid, cwd, state) = claude_file(file, start.parse().ok()?)?;
                     let log = claude_log(config, &cwd, &sid);
-                    Some(seen("claude", sid, cwd, state, log))
+                    Some(seen("claude", sid, cwd, state, None, log))
                 }
-                ["R", home, rollout, size, id, cwd, source, last] => {
+                ["R", home, rollout, modified, size, id, cwd, source, last] => {
                     // Служебные потоки (Guardian, субагенты) записаны с источником-объектом.
                     if !source.starts_with(r#""source":""#) {
                         return None;
@@ -155,16 +158,15 @@ fn parse_scan(output: &str, engine: &Path, container: &str) -> Vec<Seen> {
                     if sid.is_empty() {
                         return None;
                     }
-                    let last = ["task_started", "task_complete", "turn_aborted"]
-                        .into_iter()
-                        .find(|kind| last.contains(kind));
+                    let last = TURN_EVENTS.into_iter().find(|kind| last.contains(kind));
                     let whole = size.parse::<u64>().is_ok_and(|size| size <= TAIL_BYTES);
                     let log = Log::Codex {
                         rollout: (*rollout).to_string(),
                         index: format!("{home}/session_index.jsonl"),
                     };
                     let cwd = quoted(cwd, "cwd").unwrap_or_default().to_string();
-                    Some(seen("codex", sid, cwd, turn_state(last, whole), log))
+                    let state = turn_state(last, whole);
+                    Some(seen("codex", sid, cwd, state, modified.parse().ok(), log))
                 }
                 _ => None,
             }
@@ -269,7 +271,7 @@ mod tests {
             "C\t501\t/home/dev/.claude\t",
             r#"{"sessionId":"old","status":"busy","procStart":"1"}"#,
             "\n",
-            "R\t/home/dev/.codex\t/home/dev/.codex/sessions/2026/11/16/rollout-c1.jsonl\t2048\t",
+            "R\t/home/dev/.codex\t/home/dev/.codex/sessions/2026/11/16/rollout-c1.jsonl\t1794830000\t2048\t",
             r#""id":"c1""#,
             "\t",
             r#""cwd":"/work/app""#,
@@ -278,7 +280,7 @@ mod tests {
             "\t",
             r#""type":"task_complete""#,
             "\n",
-            "R\t/home/dev/.codex\t/home/dev/.codex/sessions/2026/11/16/rollout-g1.jsonl\t10\t",
+            "R\t/home/dev/.codex\t/home/dev/.codex/sessions/2026/11/16/rollout-g1.jsonl\t1794830000\t10\t",
             r#""id":"g1""#,
             "\t",
             r#""cwd":"/work/app""#,
@@ -300,6 +302,7 @@ mod tests {
             ]
         );
         assert_eq!(seen[0].access, Access::Exec(PathBuf::from(ENGINE)));
+        assert_eq!((seen[0].activity, seen[1].activity), (None, Some(1_794_830_000)));
         assert_eq!(
             seen[1].log,
             Log::Codex {
@@ -313,7 +316,7 @@ mod tests {
     fn long_codex_turns_without_a_visible_start_are_busy() {
         let line = |size: u64| {
             format!(
-                "R\t/h\t/h/sessions/r.jsonl\t{size}\t\"id\":\"c1\"\t\"cwd\":\"/w\"\t\"source\":\"cli\"\t\n"
+                "R\t/h\t/h/sessions/r.jsonl\t1794830000\t{size}\t\"id\":\"c1\"\t\"cwd\":\"/w\"\t\"source\":\"cli\"\t\n"
             )
         };
         let state = |size| parse_scan(&line(size), Path::new(ENGINE), "c")[0].state.clone();
