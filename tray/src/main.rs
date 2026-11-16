@@ -11,6 +11,7 @@ mod icon;
 mod menu;
 mod model;
 mod run;
+mod startup;
 
 use std::env;
 use std::fs::OpenOptions;
@@ -21,10 +22,13 @@ use disp::VERSION;
 use disp::board::Board;
 use disp::cli::TRAY_RUNNING_EXIT;
 
+use startup::Outcome;
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
-        None => start(),
+        None => start(false),
+        Some(startup::CHILD) => start(true),
         Some("--detach") => detach(),
         Some("--autostart") => autostart::enable(),
         Some("--no-autostart") => autostart::disable(),
@@ -44,32 +48,43 @@ fn main() -> ExitCode {
     ExitCode::from(code)
 }
 
-/// Показывает значок, если его ещё нет.
-fn start() -> u8 {
+/// Показывает значок, если его ещё нет. `report` — сообщить итог запуска в канал
+/// `--detach` (см. `startup`); ошибки в любом случае пишутся в stderr.
+fn start(report: bool) -> u8 {
+    let told = move |outcome: &Outcome| {
+        if report {
+            startup::report(outcome);
+        }
+    };
     let store = Board::load().store;
     // Замок держится до выхода программы: второй значок не появится.
     let _lock = match store.tray_lock() {
         Ok(Some(lock)) => lock,
         Ok(None) => {
             eprintln!("disp-tray: значок уже в трее");
+            told(&Outcome::Running);
             return 0;
         }
         Err(err) => {
-            eprintln!(
-                "disp-tray: не удалось взять замок {}: {err}",
+            let text = format!(
+                "не удалось взять замок {}: {err}",
                 store.paths.tray_lock().display()
             );
+            eprintln!("disp-tray: {text}");
+            told(&Outcome::Failed(text));
             return 1;
         }
     };
-    run::run(run::App::new(store))
+    run::run(run::App::new(store), told)
 }
 
-/// `disp-tray --detach`: запускает значок отдельным процессом и сразу выходит.
+/// `disp-tray --detach`: запускает значок отдельным процессом и выходит, как только
+/// значок показался.
 ///
 /// Так значок запускает `disp`: он ждёт этот короткий процесс и узнаёт, удался ли
 /// запуск, а сам значок остаётся без родителя и не становится ни дочерним процессом
-/// панели, ни зомби. Код выхода 0 — значок запущен, `TRAY_RUNNING_EXIT` — уже в трее,
+/// панели, ни зомби. `--detach` ждёт, пока значок сообщит, показался ли он (не дольше
+/// `startup::TIMEOUT`). Код выхода 0 — значок показан, `TRAY_RUNNING_EXIT` — уже в трее,
 /// иначе — ошибка с текстом в stderr. Что значок пишет о своих ошибках потом,
 /// попадает в `tray.log` в каталоге состояния.
 fn detach() -> u8 {
@@ -89,21 +104,31 @@ fn detach() -> u8 {
             return 1;
         }
     };
+    let log_path = store.paths.tray_log();
     let log = OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
-        .open(store.paths.tray_log())
+        .open(&log_path)
         .map_or_else(|_| Stdio::null(), Stdio::from);
     let started = Command::new(&exe)
+        .arg(startup::CHILD)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(log)
         .spawn();
-    match started {
-        Ok(_) => 0,
+    let mut child = match started {
+        Ok(child) => child,
         Err(err) => {
             eprintln!("disp-tray: не удалось запустить {}: {err}", exe.display());
+            return 1;
+        }
+    };
+    match startup::wait(&mut child, startup::TIMEOUT, &log_path) {
+        Outcome::Shown => 0,
+        Outcome::Running => TRAY_RUNNING_EXIT as u8,
+        Outcome::Failed(text) => {
+            eprintln!("disp-tray: {text}");
             1
         }
     }

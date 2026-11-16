@@ -19,6 +19,7 @@ use crate::actions;
 use crate::icon;
 use crate::menu;
 use crate::model::{Action, Tray};
+use crate::startup::Outcome;
 
 /// Как часто смотреть, не изменился ли каталог сессий.
 const POLL: Duration = Duration::from_secs(1);
@@ -192,9 +193,26 @@ fn listen(sink: impl Fn(Signal) + Send + Sync + 'static, activate: bool) {
     }
 }
 
-/// Показывает значок и ведёт его, пока не нажато «Убрать значок». Код выхода программы.
+/// Показывает значок, отдаёт итог в `told` — показан или почему нет — и при удаче ведёт
+/// значок дальше.
+fn begin(app: &mut App, told: impl FnOnce(&Outcome)) -> Result<(), ()> {
+    match app.show() {
+        Ok(()) => {
+            told(&Outcome::Shown);
+            Ok(())
+        }
+        Err(err) => {
+            warn(&err);
+            told(&Outcome::Failed(err));
+            Err(())
+        }
+    }
+}
+
+/// Показывает значок и ведёт его, пока не нажато «Убрать значок». Итог показа отдаёт в
+/// `told`. Код выхода программы.
 #[cfg(not(target_os = "macos"))]
-pub fn run(mut app: App) -> u8 {
+pub fn run(mut app: App, told: impl FnOnce(&Outcome)) -> u8 {
     use std::sync::mpsc::{self, RecvTimeoutError};
 
     let (sender, signals) = mpsc::channel();
@@ -204,8 +222,7 @@ pub fn run(mut app: App) -> u8 {
         },
         true,
     );
-    if let Err(err) = app.show() {
-        warn(&err);
+    if begin(&mut app, told).is_err() {
         return 1;
     }
     loop {
@@ -221,10 +238,10 @@ pub fn run(mut app: App) -> u8 {
     }
 }
 
-/// Показывает значок и ведёт его, пока не нажато «Убрать значок». Цикл событий AppKit
-/// не возвращает управление: программа завершается из него.
+/// Показывает значок и ведёт его, пока не нажато «Убрать значок». Итог показа отдаёт в
+/// `told`. Цикл событий AppKit не возвращает управление: программа завершается из него.
 #[cfg(target_os = "macos")]
-pub fn run(mut app: App) -> u8 {
+pub fn run(mut app: App, told: impl FnOnce(&Outcome) + 'static) -> u8 {
     use std::sync::Mutex;
     use std::time::Instant;
 
@@ -244,13 +261,15 @@ pub fn run(mut app: App) -> u8 {
         },
         false,
     );
+    let mut told = Some(told);
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + POLL);
         match event {
             // Значок в строке меню создаётся, когда цикл событий уже запущен.
             Event::NewEvents(StartCause::Init) => {
-                if let Err(err) = app.show() {
-                    warn(&err);
+                if let Some(told) = told.take()
+                    && begin(&mut app, told).is_err()
+                {
                     *control_flow = ControlFlow::ExitWithCode(1);
                 }
             }

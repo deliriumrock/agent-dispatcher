@@ -7,6 +7,8 @@ publish = false
 
 [dependencies]
 disp = { path = ".." }
+# dup2 поверх stdout: значок отпускает канал, по которому сообщил `--detach` итог запуска.
+rustix = { version = "1", features = ["stdio"] }
 
 # Linux: значок по D-Bus (StatusNotifierItem) через ksni, без GTK и libappindicator.
 [target.'cfg(target_os = "linux")'.dependencies]
