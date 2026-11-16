@@ -31,6 +31,7 @@ fn main() -> ExitCode {
         "unlabel" => cli::unlabel(),
         "repair" => cli::repair(),
         "gui" => cli::gui(rest),
+        "tray" => cli::tray(rest),
         "config" => install::config(rest),
         "install" => install::install(rest),
         "doctor" => cli::doctor(),

@@ -55,6 +55,7 @@ pub fn watch(args: &[String]) -> u8 {
             .filter(|value| *value > 0.0);
         return cli::watch_plain(Duration::from_secs_f64(seconds.unwrap_or(2.0)));
     }
+    cli::tray_alongside(&Board::load());
     match run() {
         Ok(()) => 0,
         Err(err) => {
