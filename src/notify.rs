@@ -5,6 +5,7 @@
 
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::thread;
 
 use crate::config::Settings;
 use crate::detect::which;
@@ -81,6 +82,10 @@ pub fn desktop(text: &str, title: &str) -> bool {
 }
 
 /// Запускает процесс и не ждёт его. Ошибка запуска не мешает обработке события.
+///
+/// Завершившийся процесс забирает фоновый поток. Хук живёт миллисекунды, и его детей
+/// подбирает система, но панель и значок в трее работают часами: без этого каждое
+/// уведомление и каждая подпись панели оставались бы у них зомби до самого выхода.
 pub fn spawn(command: &mut Command, stdin: Option<&[u8]>) {
     command.stdout(Stdio::null()).stderr(Stdio::null());
     command.stdin(if stdin.is_some() {
@@ -93,5 +98,59 @@ pub fn spawn(command: &mut Command, stdin: Option<&[u8]>) {
     };
     if let (Some(bytes), Some(mut pipe)) = (stdin, child.stdin.take()) {
         let _ = pipe.write_all(bytes);
+    }
+    // Если поток не создать, процесс просто останется незабранным, как раньше.
+    let _ = thread::Builder::new()
+        .name("disp-reap".to_string())
+        .spawn(move || child.wait());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{Duration, Instant};
+
+    /// Дети этого процесса с именем `name`: номер и состояние из `/proc/<pid>/stat`.
+    fn children_named(name: &str) -> Vec<(u32, char)> {
+        let Ok(tasks) = fs::read_dir("/proc/self/task") else {
+            return Vec::new();
+        };
+        tasks
+            .flatten()
+            .filter_map(|task| fs::read_to_string(task.path().join("children")).ok())
+            .flat_map(|list| {
+                list.split_whitespace()
+                    .filter_map(|pid| pid.parse::<u32>().ok())
+                    .collect::<Vec<_>>()
+            })
+            .filter_map(|pid| {
+                let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+                let (head, tail) = stat.split_once(") ")?;
+                let comm = head.split_once(" (")?.1;
+                (comm == name).then(|| (pid, tail.chars().next().unwrap_or('?')))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn finished_processes_are_reaped() {
+        // Копия `true` под своим именем: её детей не спутать с детьми других тестов.
+        let dir = std::env::temp_dir().join(format!("disp-reap-{}", std::process::id()));
+        assert!(fs::create_dir_all(&dir).is_ok());
+        let program = dir.join("disp-reap-probe");
+        assert!(fs::copy("/bin/true", &program).is_ok());
+        for _ in 0..3 {
+            spawn(&mut Command::new(&program), None);
+        }
+        spawn(Command::new("cat").arg("-"), Some(b"stdin"));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut left = children_named("disp-reap-probe");
+        while !left.is_empty() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+            left = children_named("disp-reap-probe");
+        }
+        let _ = fs::remove_dir_all(&dir);
+        assert!(left.is_empty(), "не забраны: {left:?}");
     }
 }
