@@ -382,7 +382,7 @@ fn text_of(payload: &Map<String, Value>, keys: &[&str]) -> String {
 }
 
 /// Оставляет в идентификаторе только безопасные для имени файла символы.
-fn sanitize(raw: &str) -> String {
+pub(crate) fn sanitize(raw: &str) -> String {
     raw.chars()
         .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
         .take(80)

@@ -297,8 +297,15 @@ fn git_toplevel(cwd: &Path) -> Option<PathBuf> {
     cwd.ancestors()
         .filter(|dir| !dir.as_os_str().is_empty())
         .take_while(|dir| *dir == cwd || !ceilings.iter().any(|ceiling| ceiling == dir))
-        .find(|dir| dir.join(".git").symlink_metadata().is_ok())
+        .find(|dir| is_repository(&dir.join(".git")))
         .map(Path::to_path_buf)
+}
+
+/// Настоящий ли это `.git`: каталог с `HEAD` или файл-указатель (worktree, подмодуль).
+/// Пустой каталог `.git`, оставшийся от чего-то, git пропускает и ищет выше — так же
+/// и здесь.
+fn is_repository(dot_git: &Path) -> bool {
+    dot_git.is_file() || dot_git.join("HEAD").is_file()
 }
 
 /// Файл, который агент записал или изменил инструментом из события. `None`, если
@@ -650,6 +657,19 @@ pub fn which(program: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::fakeproc::FakeProc;
+
+    #[test]
+    fn empty_git_directory_is_not_a_repository() {
+        // В репозитории `site` подкаталог `app` с пустым `.git`: git его пропускает.
+        let root = std::env::temp_dir().join(format!("disp-empty-git-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        assert!(fs::create_dir_all(root.join("site/.git")).is_ok());
+        assert!(fs::write(root.join("site/.git/HEAD"), "ref: refs/heads/docs/check\n").is_ok());
+        assert!(fs::create_dir_all(root.join("site/app/.git")).is_ok());
+        let found = project(&root.join("site/app").to_string_lossy());
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(found, ("site".to_string(), "docs/check".to_string()));
+    }
 
     #[test]
     fn base_name_matches_the_utility() {
