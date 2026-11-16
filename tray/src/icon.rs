@@ -58,55 +58,52 @@ const PLUS: usize = 10;
 const GLYPH_W: u32 = 5;
 const GLYPH_H: u32 = 7;
 
+/// Толщина пустого кольца в пикселях.
+const RING: f32 = 4.5;
+/// Размер точки шрифта в пикселях: для одной цифры и для двух знаков («9+»). Подобраны
+/// так, чтобы цифры были как можно крупнее и не задевали край кружка.
+const DOT_ONE: f32 = 4.6;
+const DOT_TWO: f32 = 3.3;
+
 /// Значок: `SIZE`×`SIZE` пикселей RGBA, построчно сверху вниз. С числом — залитый
-/// кружок с цифрами (больше девяти — «9+»), без числа — пустое кольцо.
+/// кружок во весь значок с цифрами (больше девяти — «9+»), без числа — пустое кольцо.
+///
+/// Панель GNOME показывает значки в квадрате 16×16 точек, строка меню macOS — высотой
+/// 18 точек: кружок занимает квадрат целиком, крупнее его не сделать.
 pub fn render(level: Level, count: usize) -> Vec<u8> {
     let paint = paint(level);
     let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
     let center = SIZE as f32 / 2.0;
-    let outer = center - 1.0;
-    let inner = if count > 0 { 0.0 } else { outer - 4.5 };
+    let outer = center;
+    let inner = if count > 0 { 0.0 } else { outer - RING };
     for y in 0..SIZE {
         for x in 0..SIZE {
-            let covered = coverage(x, y, |dx, dy| {
-                let r = (dx * dx + dy * dy).sqrt();
+            let covered = coverage(x, y, |px, py| {
+                let r = (px - center).hypot(py - center);
                 r <= outer && r >= inner
             });
             if covered > 0.0 {
-                put(&mut rgba, x, y, paint.fill, covered);
+                blend(&mut rgba, x, y, paint.fill, covered);
             }
         }
     }
-    let glyphs: Vec<usize> = match count {
-        0 => Vec::new(),
-        1..=9 => vec![count],
-        _ => vec![9, PLUS],
-    };
-    if !glyphs.is_empty() {
-        // Одна цифра крупнее, две — мельче, чтобы поместиться в круг.
-        let scale = if glyphs.len() == 1 { 4 } else { 3 };
-        let count = glyphs.len() as u32;
-        let width = (count * GLYPH_W + (count - 1)) * scale;
-        let height = GLYPH_H * scale;
-        let left = (SIZE - width) / 2;
-        let top = (SIZE - height) / 2;
-        for (index, &glyph) in glyphs.iter().enumerate() {
-            let origin = left + index as u32 * (GLYPH_W + 1) * scale;
-            draw_glyph(&mut rgba, glyph, origin, top, scale, paint.ink);
-        }
+    match count {
+        0 => {}
+        1..=9 => draw_text(&mut rgba, &[count], DOT_ONE, paint.ink),
+        _ => draw_text(&mut rgba, &[9, PLUS], DOT_TWO, paint.ink),
     }
     rgba
 }
 
-/// Доля пикселя внутри фигуры: 16 проб на пиксель сглаживают край круга.
+/// Доля пикселя (`x`, `y`) внутри фигуры: 16 проб на пиксель сглаживают край.
+/// `inside` получает координаты пробы в пикселях значка.
 fn coverage(x: u32, y: u32, inside: impl Fn(f32, f32) -> bool) -> f32 {
-    let center = SIZE as f32 / 2.0;
     let mut hits = 0;
     for sy in 0..4 {
         for sx in 0..4 {
-            let dx = x as f32 + (sx as f32 + 0.5) / 4.0 - center;
-            let dy = y as f32 + (sy as f32 + 0.5) / 4.0 - center;
-            if inside(dx, dy) {
+            let px = x as f32 + (sx as f32 + 0.5) / 4.0;
+            let py = y as f32 + (sy as f32 + 0.5) / 4.0;
+            if inside(px, py) {
                 hits += 1;
             }
         }
@@ -114,27 +111,48 @@ fn coverage(x: u32, y: u32, inside: impl Fn(f32, f32) -> bool) -> f32 {
     hits as f32 / 16.0
 }
 
-/// Закрашивает пиксель цветом `color` с непрозрачностью `alpha` (0–1).
-fn put(rgba: &mut [u8], x: u32, y: u32, color: [u8; 3], alpha: f32) {
+/// Кладёт цвет `color` с непрозрачностью `amount` (0–1) поверх пикселя: обычное
+/// наложение «поверх» для неумноженной альфы. На прозрачном пикселе цвет остаётся
+/// чистым, меняется только альфа — сглаженный край не темнеет.
+fn blend(rgba: &mut [u8], x: u32, y: u32, color: [u8; 3], amount: f32) {
     let at = ((y * SIZE + x) * 4) as usize;
-    rgba[at..at + 3].copy_from_slice(&color);
+    let under = f32::from(rgba[at + 3]) / 255.0;
+    let alpha = amount + under * (1.0 - amount);
+    if alpha <= 0.0 {
+        return;
+    }
+    for (channel, value) in color.iter().enumerate() {
+        let old = f32::from(rgba[at + channel]) * under * (1.0 - amount);
+        rgba[at + channel] = ((f32::from(*value) * amount + old) / alpha).round() as u8;
+    }
     rgba[at + 3] = (alpha * 255.0).round() as u8;
 }
 
-/// Рисует знак `glyph` с левым верхним углом в (`left`, `top`), каждая точка —
-/// квадрат `scale`×`scale`.
-fn draw_glyph(rgba: &mut [u8], glyph: usize, left: u32, top: u32, scale: u32, ink: [u8; 3]) {
-    for (row, bits) in GLYPHS[glyph].iter().enumerate() {
-        for column in 0..GLYPH_W {
-            if bits & (1 << (GLYPH_W - 1 - column)) == 0 {
-                continue;
+/// Рисует строку знаков по центру значка: каждая точка шрифта — квадрат `dot`×`dot`
+/// пикселей, между знаками — одна пустая точка. Край сглажен.
+fn draw_text(rgba: &mut [u8], glyphs: &[usize], dot: f32, ink: [u8; 3]) {
+    let cells = glyphs.len() as u32 * (GLYPH_W + 1) - 1;
+    let left = (SIZE as f32 - cells as f32 * dot) / 2.0;
+    let top = (SIZE as f32 - GLYPH_H as f32 * dot) / 2.0;
+    let lit = |px: f32, py: f32| -> bool {
+        let (column, row) = ((px - left) / dot, (py - top) / dot);
+        if column < 0.0 || row < 0.0 || row >= GLYPH_H as f32 {
+            return false;
+        }
+        let (cell, row) = (column as u32, row as usize);
+        let (index, column) = ((cell / (GLYPH_W + 1)) as usize, cell % (GLYPH_W + 1));
+        match glyphs.get(index) {
+            Some(&glyph) if column < GLYPH_W => {
+                GLYPHS[glyph][row] & (1 << (GLYPH_W - 1 - column)) != 0
             }
-            for dy in 0..scale {
-                for dx in 0..scale {
-                    let x = left + column * scale + dx;
-                    let y = top + row as u32 * scale + dy;
-                    put(rgba, x, y, ink, 1.0);
-                }
+            _ => false,
+        }
+    };
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let covered = coverage(x, y, lit);
+            if covered > 0.0 {
+                blend(rgba, x, y, ink, covered);
             }
         }
     }
@@ -190,34 +208,53 @@ mod tests {
     }
 
     #[test]
-    fn working_count_is_white_on_blue() {
-        // «3» — 14 точек шрифта по 4×4 пикселя.
-        assert_eq!(opaque_with(&render(Level::Busy, 3), [255, 255, 255]), 14 * 16);
+    fn disc_fills_the_whole_icon() {
+        // Кружок доходит до краёв значка: середины сторон закрашены, углы — нет.
+        let rgba = render(Level::Busy, 3);
+        let middle = SIZE / 2;
+        for (x, y) in [(0, middle), (SIZE - 1, middle), (middle, 0), (middle, SIZE - 1)] {
+            assert!(pixel(&rgba, x, y)[3] >= 128, "({x}, {y})");
+        }
+        assert_eq!(pixel(&rgba, 1, 1)[3], 0);
     }
 
     #[test]
     fn count_is_drawn_in_ink() {
         let ink = [32, 32, 32];
-        assert_eq!(opaque_with(&render(Level::Attention, 0), ink), 0);
-        // «1» — 10 точек шрифта, каждая 4×4 пикселя.
-        assert_eq!(opaque_with(&render(Level::Attention, 1), ink), 10 * 16);
-        // «9+» — 15 + 9 точек по 3×3.
-        assert_eq!(opaque_with(&render(Level::Attention, 12), ink), (15 + 9) * 9);
+        let ink_pixels = |count| opaque_with(&render(Level::Attention, count), ink);
+        assert_eq!(ink_pixels(0), 0);
+        // У «8» точек шрифта больше, чем у «1»: 20 против 10.
+        assert!(ink_pixels(1) > 100);
+        assert!(ink_pixels(8) > ink_pixels(1) * 3 / 2);
+        assert!(ink_pixels(12) > 0);
+        assert!(opaque_with(&render(Level::Busy, 3), [255, 255, 255]) > 100);
+    }
+
+    #[test]
+    fn digits_take_two_thirds_of_the_icon_height() {
+        // Высота цифры — от первой до последней строки с краской.
+        let rgba = render(Level::Done, 8);
+        let inked: Vec<u32> = (0..SIZE)
+            .filter(|&y| (0..SIZE).any(|x| pixel(&rgba, x, y)[..3] == [255, 255, 255]))
+            .collect();
+        let height = inked.last().unwrap_or(&0) - inked.first().unwrap_or(&0) + 1;
+        assert!(height * 3 > SIZE * 2, "высота цифры {height} из {SIZE}");
     }
 
     #[test]
     fn digits_stay_inside_the_disc() {
-        // Каждый пиксель цифр лежит на кружке: вокруг них нет прозрачных дыр.
-        for count in [1, 8, 10] {
+        // Всё, что не цвет кружка, лежит заметно внутри него: цифры не задевают край.
+        for count in [1, 2, 7, 8, 10] {
             let rgba = render(Level::Done, count);
-            let ink = [255, 255, 255];
+            let fill = [30, 135, 60];
             for y in 0..SIZE {
                 for x in 0..SIZE {
                     let p = pixel(&rgba, x, y);
-                    if p[..3] == ink && p[3] == 255 {
+                    if p[3] > 0 && p[..3] != fill {
                         let dx = x as f32 + 0.5 - SIZE as f32 / 2.0;
                         let dy = y as f32 + 0.5 - SIZE as f32 / 2.0;
-                        assert!((dx * dx + dy * dy).sqrt() < SIZE as f32 / 2.0 - 1.5);
+                        let r = dx.hypot(dy);
+                        assert!(r < SIZE as f32 / 2.0 - 1.0, "{count}: ({x}, {y}) r={r}");
                     }
                 }
             }
