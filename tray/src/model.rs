@@ -18,11 +18,11 @@ const TITLE_MAX: usize = 48;
 pub enum Level {
     /// Кто-то ждёт человека: ответа, разрешения или разбора сбоя.
     Attention,
-    /// Есть законченные сессии, результат которых ещё не посмотрен.
-    Done,
     /// Сессии работают, человек не нужен.
     Busy,
-    /// Открытых сессий нет.
+    /// Не работает ничего, остались законченные сессии, результат которых ещё не убран.
+    Done,
+    /// Ни работающих, ни законченных: открытых сессий нет или они простаивают.
     #[default]
     Calm,
 }
@@ -116,26 +116,34 @@ pub struct Tray {
 
 impl Tray {
     /// Значок по строкам доски, уже отсортированным (`Board::visible`).
+    ///
+    /// Старшинство то же, что в таблице и панели: сначала те, кто ждёт человека, затем
+    /// работающие, затем простаивающие, в конце готовые. По нему же выбирается вид
+    /// значка: готовые красят его, только когда больше ничего не идёт.
     pub fn from_rows(rows: &[Row]) -> Tray {
         let counts = Counts::of(rows);
+        let idle = rows.iter().filter(|row| row.view == View::Idle).count();
         let (level, count) = if counts.attention > 0 {
             (Level::Attention, counts.attention)
-        } else if counts.done > 0 {
-            (Level::Done, counts.done)
         } else if counts.working + counts.quiet > 0 {
             (Level::Busy, 0)
+        } else if counts.done > 0 {
+            (Level::Done, counts.done)
         } else {
             (Level::Calm, 0)
         };
-        let summary = if counts == Counts::default() {
+        let summary = if rows.is_empty() {
             "Незакрытых сессий нет".to_string()
+        } else if idle > 0 {
+            format!("{} · простой: {idle}", counts.line())
         } else {
             counts.line()
         };
-        let groups: [(&str, &[View]); 3] = [
+        let groups: [(&str, &[View]); 4] = [
             ("Ждут тебя", &[View::Wait, View::Err, View::Lost, View::Stuck]),
-            ("Готово", &[View::Done]),
             ("Работают", &[View::Work, View::Quiet]),
+            ("Простой", &[View::Idle]),
+            ("Готово", &[View::Done]),
         ];
         let sections = groups
             .into_iter()
@@ -262,7 +270,7 @@ mod tests {
         assert_eq!(tray.level, Level::Attention);
         assert_eq!(tray.count, 2);
         let titles: Vec<&str> = tray.sections.iter().map(|s| s.title.as_str()).collect();
-        assert_eq!(titles, ["Ждут тебя: 2", "Готово: 1", "Работают: 1"]);
+        assert_eq!(titles, ["Ждут тебя: 2", "Работают: 1", "Готово: 1"]);
 
         let waiting = &tray.sections[0].entries[0];
         assert_eq!(waiting.text, "! site-31 · claude — Починить импорт");
@@ -273,24 +281,35 @@ mod tests {
         let lost = &tray.sections[0].entries[1];
         assert_eq!(lost.info, ["x ПРЕРВАНА", "закрыта"]);
         assert_eq!(labels(lost), ["Убрать из списка"]);
-        assert_eq!(labels(&tray.sections[1].entries[0]), ["Перейти к панели", "Убрать из списка"]);
         // Работающая не в zellij: кнопок нет, только сведения.
-        assert!(tray.sections[2].entries[0].actions.is_empty());
+        assert!(tray.sections[1].entries[0].actions.is_empty());
+        assert_eq!(labels(&tray.sections[2].entries[0]), ["Перейти к панели", "Убрать из списка"]);
     }
 
     #[test]
-    fn done_without_waiting_shows_done_count() {
+    fn working_outranks_idle_and_done() {
         let rows = [
             row("a1", Status::Done, "zellij:dev#4", ""),
             row("b2", Status::Done, "zellij:dev#3", ""),
-            row("c3", Status::Working, "zellij:dev#2", ""),
+            row("c3", Status::Idle, "zellij:dev#5", "Черновик"),
+            row("d4", Status::Working, "zellij:dev#2", ""),
         ];
         let tray = Tray::from_rows(&rows);
-        assert_eq!((tray.level, tray.count), (Level::Done, 2));
+        // Пока что-то работает, значок — кольцо работы, а не число готовых.
+        assert_eq!((tray.level, tray.count), (Level::Busy, 0));
+        let titles: Vec<&str> = tray.sections.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, ["Работают: 1", "Простой: 1", "Готово: 2"]);
+        assert!(tray.summary.ends_with(" · простой: 1"));
+        // Простаивающую можно убрать: она не работает.
+        assert_eq!(labels(&tray.sections[1].entries[0]), ["Перейти к панели", "Убрать из списка"]);
         // Без названия — только задача и агент.
-        assert_eq!(tray.sections[0].entries[0].text, "✓ site-31 · claude");
-        let busy = Tray::from_rows(&rows[2..]);
-        assert_eq!((busy.level, busy.count), (Level::Busy, 0));
+        assert_eq!(tray.sections[2].entries[0].text, "✓ site-31 · claude");
+
+        let done = Tray::from_rows(&rows[..3]);
+        assert_eq!((done.level, done.count), (Level::Done, 2));
+        let idle = Tray::from_rows(&rows[2..3]);
+        assert_eq!((idle.level, idle.count), (Level::Calm, 0));
+        assert_ne!(idle.summary, "Незакрытых сессий нет");
     }
 
     #[test]

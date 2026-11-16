@@ -487,6 +487,7 @@ pub fn gui(args: &[String]) -> u8 {
         warn("disp gui: не найдена программа disp-gui (собрать и поставить: make install-gui)");
         return 1;
     };
+    tray_alongside(&board);
     let window = args.iter().any(|arg| arg == "--window");
     let size = if window { None } else { pane_pixels() };
     let mut command = match (size, term_everything(&board)) {
@@ -536,47 +537,117 @@ pub fn companion(name: &str) -> Option<PathBuf> {
     beside.or_else(|| which(name))
 }
 
+/// Программа значка в трее: `DISP_TRAY_BIN`, рядом с самой `disp`, в `PATH`.
+fn tray_program(board: &Board) -> Option<PathBuf> {
+    match board.settings.get("DISP_TRAY_BIN") {
+        Some(path) => Some(PathBuf::from(path)),
+        None => companion("disp-tray"),
+    }
+}
+
+/// Чем кончилась попытка показать значок в трее.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TrayStart {
+    /// Значок запущен.
+    Started,
+    /// Значок уже был в трее.
+    Running,
+    /// Программы `disp-tray` нет.
+    Missing,
+    /// Запустить не удалось; текст для человека.
+    Failed(String),
+}
+
+/// Показывает значок в трее, если его ещё нет.
+///
+/// `disp-tray` запускается через промежуточную оболочку, которая сразу выходит: значок
+/// не становится дочерним процессом `disp` и не остаётся зомби, когда его убирают,
+/// а `disp` тем временем ещё работает. Своя группа процессов — закрытие терминала
+/// и Ctrl+C до значка не доходят. Переменные zellij убираются: значок должен вести
+/// себя одинаково, откуда бы его ни запустили, в том числе при входе в систему.
+pub fn start_tray(board: &Board) -> TrayStart {
+    let Some(program) = tray_program(board) else {
+        return TrayStart::Missing;
+    };
+    match board.store.tray_lock() {
+        Ok(Some(_free)) => {}
+        Ok(None) => return TrayStart::Running,
+        Err(err) => return TrayStart::Failed(format!("не проверить, запущен ли значок: {err}")),
+    }
+    let status = Command::new("/bin/sh")
+        .args(["-c", "\"$0\" &"])
+        .arg(&program)
+        .env_remove("ZELLIJ")
+        .env_remove("ZELLIJ_SESSION_NAME")
+        .env_remove("ZELLIJ_PANE_ID")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .status();
+    match status {
+        Ok(status) if status.success() => TrayStart::Started,
+        Ok(status) => TrayStart::Failed(format!("оболочка запуска вышла с {status}")),
+        Err(err) => TrayStart::Failed(err.to_string()),
+    }
+}
+
+/// Значок вместе с панелью: `disp watch` и `disp gui` показывают его сами. Не показывают
+/// при `DISP_TRAY=0`, в сеансе SSH (рабочий стол, где появился бы значок, не перед
+/// глазами) и без рабочего стола. Молча: панель сейчас займёт экран, а значок — не то,
+/// ради чего её открывали.
+pub fn tray_alongside(board: &Board) {
+    let desktop = cfg!(target_os = "macos")
+        || env_nonempty("WAYLAND_DISPLAY").is_some()
+        || env_nonempty("DISPLAY").is_some();
+    if board.settings.get("DISP_TRAY") == Some("0")
+        || env_nonempty("SSH_CONNECTION").is_some()
+        || !desktop
+    {
+        return;
+    }
+    let _ = start_tray(board);
+}
+
 /// `disp tray [ключи]`: значок в трее.
 ///
 /// Без ключей запускает `disp-tray` в фоне, отдельно от терминала, и сразу возвращается;
 /// если значок уже в трее, второй не запускается. С ключами (`--autostart` и другие)
 /// передаёт их `disp-tray` и заменяется им.
 pub fn tray(args: &[String]) -> u8 {
-    let Some(program) = companion("disp-tray") else {
-        warn("disp tray: не найдена программа disp-tray (собрать и поставить: make install-tray)");
-        return 1;
-    };
+    let board = Board::load();
     if !args.is_empty() {
+        let Some(program) = tray_program(&board) else {
+            warn(TRAY_MISSING);
+            return 1;
+        };
         let err = Command::new(&program).args(args).exec();
         warn(&format!("disp tray: не удалось запустить: {err}"));
         return 1;
     }
-    match Board::load().store.tray_lock() {
-        Ok(Some(_free)) => {}
-        Ok(None) => {
-            emit("disp tray: значок уже в трее\n");
-            return 0;
-        }
-        Err(err) => warn(&format!("disp tray: не проверить, запущен ли значок: {err}")),
-    }
-    // Своя группа процессов: закрытие терминала и Ctrl+C до значка не доходят.
-    let started = Command::new(&program)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn();
-    match started {
-        Ok(child) => {
-            emit(&format!("disp tray: значок в трее запущен (pid {})\n", child.id()));
+    match start_tray(&board) {
+        TrayStart::Started => {
+            emit("disp tray: значок в трее запущен\n");
             0
         }
-        Err(err) => {
+        TrayStart::Running => {
+            emit("disp tray: значок уже в трее\n");
+            0
+        }
+        TrayStart::Missing => {
+            warn(TRAY_MISSING);
+            1
+        }
+        TrayStart::Failed(err) => {
             warn(&format!("disp tray: не удалось запустить: {err}"));
             1
         }
     }
 }
+
+/// Сообщение о том, что программы значка нет.
+const TRAY_MISSING: &str =
+    "disp tray: не найдена программа disp-tray (собрать и поставить: make install-tray)";
 
 /// Программа term-everything: `DISP_TERM_EVERYTHING` или `term-everything` в `PATH`.
 fn term_everything(board: &Board) -> Option<PathBuf> {
@@ -774,12 +845,14 @@ pub fn usage() -> String {
   disp watch         живая панель для отдельной панели zellij: стрелки — выбор,
                      a — ответить агенту «да», x — убрать, g — перейти к агенту,
                      t — лента времени,
-                     ? — все клавиши
+                     ? — все клавиши; заодно показывает значок в трее
+                     (DISP_TRAY=0 в настройках — не показывать)
   disp watch --plain [сек]   таблица без управления, обновляется раз в N секунд
   disp gui           графическая оболочка: в панели терминала через term-everything,
                      с ключом --window — обычным окном на рабочем столе
-  disp tray          значок в трее (Linux, macOS): кто ждёт, кнопки «да», «перейти»,
-                     «убрать»; --autostart — запускать при входе, --no-autostart — нет
+  disp tray          только значок в трее (Linux, macOS): кто ждёт, кнопки «да»,
+                     «перейти», «убрать»; --autostart — показывать при входе в систему,
+                     --no-autostart — перестать
   disp show <id>    подробности: промпт, последний ответ, подзадачи
   disp ok <id|задача>...   убрать из списка: результат посмотрел
   disp ok --ended    убрать все закрытые сессии; --done: все законченные
