@@ -408,11 +408,22 @@ impl Counts {
         }
     }
 
-    /// Сводка одной строкой.
+    /// Сводка одной строкой, в порядке таблицы: ждут тебя, работают, молчат, готово.
     pub fn line(&self) -> String {
+        self.line_with_idle(0)
+    }
+
+    /// Сводка одной строкой, и с простаивающими, если они есть: между молчащими
+    /// и готовыми, где они стоят и в таблице.
+    pub fn line_with_idle(&self, idle: usize) -> String {
+        let idle = if idle > 0 {
+            format!(" · простой: {idle}")
+        } else {
+            String::new()
+        };
         format!(
-            "ждут тебя: {} · готово: {} · работают: {} · молчат: {}",
-            self.attention, self.done, self.working, self.quiet
+            "ждут тебя: {} · работают: {} · молчат: {}{idle} · готово: {}",
+            self.attention, self.working, self.quiet, self.done
         )
     }
 }
@@ -844,7 +855,7 @@ mod tests {
         let counts = Counts::of([&command, &gone, &stuck, &unknown]);
         assert_eq!(
             counts.line(),
-            "ждут тебя: 2 · готово: 0 · работают: 1 · молчат: 1"
+            "ждут тебя: 2 · работают: 1 · молчат: 1 · готово: 0"
         );
 
         // Проверка не трогает строки, которые не молчат.
@@ -874,7 +885,7 @@ mod tests {
         );
         assert_eq!(
             counts.line(),
-            "ждут тебя: 3 · готово: 1 · работают: 1 · молчат: 0"
+            "ждут тебя: 3 · работают: 1 · молчат: 0 · готово: 1"
         );
     }
 }
