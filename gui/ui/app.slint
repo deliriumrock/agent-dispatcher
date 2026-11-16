@@ -405,12 +405,7 @@ export component AppWindow inherits Window {
                             filled: true;
                         }
 
-                        Badge {
-                            label: "готово";
-                            count: root.unaccepted;
-                            accent: Theme.done;
-                        }
-
+                        // Порядок — как в таблице: ждут, работают, молчат, готово.
                         Badge {
                             label: "работают";
                             count: root.working;
@@ -421,6 +416,12 @@ export component AppWindow inherits Window {
                             label: "молчат";
                             count: root.silent;
                             accent: Theme.quiet;
+                        }
+
+                        Badge {
+                            label: "готово";
+                            count: root.unaccepted;
+                            accent: Theme.done;
                         }
                     }
                 }

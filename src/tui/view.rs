@@ -171,12 +171,13 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, clock: &str) {
         ],
         None => vec![Span::styled(waiting, bar_muted()), gap()],
     };
+    // Порядок — как в таблице: ждут, работают, молчат, готово.
     spans.extend([
-        part(counts.done, "готово", "✓", View::Done),
-        gap(),
         part(counts.working, "работают", "●", View::Work),
         gap(),
         part(counts.quiet, "молчат", "?", View::Quiet),
+        gap(),
+        part(counts.done, "готово", "✓", View::Done),
     ]);
     if app.show_all {
         spans.push(gap());
@@ -1121,7 +1122,7 @@ mod tests {
         assert_eq!(
             lines[0],
             format!(
-                " ждут тебя: 1  готово: 1 · работают: 1 · молчат: 0{}18:06:12  disp {VERSION}",
+                " ждут тебя: 1  работают: 1 · молчат: 0 · готово: 1{}18:06:12  disp {VERSION}",
                 " ".repeat(110 - 50 - 15 - VERSION.len() - 1)
             )
         );
@@ -1157,7 +1158,7 @@ mod tests {
         assert_eq!(
             lines[0],
             format!(
-                " ждут тебя: 1  готово: 1 · работают: 1 · молчат: 0{}18:06:12  disp {VERSION}",
+                " ждут тебя: 1  работают: 1 · молчат: 0 · готово: 1{}18:06:12  disp {VERSION}",
                 " ".repeat(80 - 50 - 15 - VERSION.len() - 1)
             )
         );
@@ -1178,7 +1179,7 @@ mod tests {
         assert_eq!(
             lines[0],
             format!(
-                " ! 1  ✓ 1  ● 1  ? 0{}18:06:12  disp {VERSION}",
+                " ! 1  ● 1  ? 0  ✓ 1{}18:06:12  disp {VERSION}",
                 " ".repeat(50 - 19 - 15 - VERSION.len() - 1)
             )
         );
@@ -1263,8 +1264,11 @@ mod tests {
         assert_eq!(buffer[(0, 0)].bg, Color::Yellow);
         assert_eq!(buffer[(13, 0)].bg, Color::Yellow);
         assert_eq!(buffer[(14, 0)].bg, BAR_BG);
-        // Ненулевой счётчик своего цвета, нулевой и время — приглушённые.
-        assert_eq!(buffer[(15, 0)].fg, Color::Green);
+        // Ненулевой счётчик своего цвета, нулевой и время — приглушённые. Порядок как
+        // в таблице: « ждут тебя: 1  работают: 1 · молчат: 0 · готово: 1».
+        assert_eq!(buffer[(15, 0)].fg, Color::Cyan);
+        assert_eq!(buffer[(29, 0)].fg, BAR_MUTED);
+        assert_eq!(buffer[(41, 0)].fg, Color::Green);
         assert_eq!(buffer[(78, 0)].fg, BAR_MUTED);
         // В подсказке клавиша яркая и жирная, пояснение обычное.
         // При 80 колонках первая подсказка — «Enter подробности».
@@ -1287,7 +1291,7 @@ mod tests {
         assert_eq!(buffer[(1, 0)].fg, BAR_MUTED);
         let top: String = (0..80).map(|x| buffer[(x, 0)].symbol()).collect();
         assert!(
-            top.starts_with(" ждут тебя: 0 · готово: 1 · работают: 2 · молчат: 0"),
+            top.starts_with(" ждут тебя: 0 · работают: 2 · молчат: 0 · готово: 1"),
             "{top}"
         );
 
