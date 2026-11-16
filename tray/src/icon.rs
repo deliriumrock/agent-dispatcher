@@ -12,40 +12,29 @@ pub const SIZE: u32 = 44;
 struct Paint {
     /// Цвет кружка.
     fill: [u8; 3],
-    /// Цвет цифр.
+    /// Цвет цифр. Подобран так, чтобы цифры читались на кружке и в 16 пикселях.
     ink: [u8; 3],
-    /// Кружок залит целиком; иначе это кольцо.
-    solid: bool,
-    /// Точка в середине кольца.
-    dot: bool,
 }
 
-/// Вид значка для уровня срочности.
+/// Цвета значка для уровня срочности.
 fn paint(level: Level) -> Paint {
+    const WHITE: [u8; 3] = [255, 255, 255];
     match level {
         Level::Attention => Paint {
             fill: [245, 166, 35],
             ink: [32, 32, 32],
-            solid: true,
-            dot: false,
-        },
-        Level::Done => Paint {
-            fill: [46, 160, 67],
-            ink: [255, 255, 255],
-            solid: true,
-            dot: false,
         },
         Level::Busy => Paint {
-            fill: [56, 170, 200],
-            ink: [255, 255, 255],
-            solid: false,
-            dot: true,
+            fill: [33, 118, 199],
+            ink: WHITE,
+        },
+        Level::Done => Paint {
+            fill: [30, 135, 60],
+            ink: WHITE,
         },
         Level::Calm => Paint {
-            fill: [150, 150, 150],
-            ink: [255, 255, 255],
-            solid: false,
-            dot: false,
+            fill: [117, 117, 117],
+            ink: WHITE,
         },
     }
 }
@@ -69,20 +58,19 @@ const PLUS: usize = 10;
 const GLYPH_W: u32 = 5;
 const GLYPH_H: u32 = 7;
 
-/// Значок: `SIZE`×`SIZE` пикселей RGBA, построчно сверху вниз. Число 0 не рисуется,
-/// больше девяти — рисуется как «9+».
+/// Значок: `SIZE`×`SIZE` пикселей RGBA, построчно сверху вниз. С числом — залитый
+/// кружок с цифрами (больше девяти — «9+»), без числа — пустое кольцо.
 pub fn render(level: Level, count: usize) -> Vec<u8> {
     let paint = paint(level);
     let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
     let center = SIZE as f32 / 2.0;
     let outer = center - 1.0;
-    let inner = if paint.solid { 0.0 } else { outer - 4.5 };
-    let dot = if paint.dot { 6.0 } else { 0.0 };
+    let inner = if count > 0 { 0.0 } else { outer - 4.5 };
     for y in 0..SIZE {
         for x in 0..SIZE {
             let covered = coverage(x, y, |dx, dy| {
                 let r = (dx * dx + dy * dy).sqrt();
-                (r <= outer && r >= inner) || r <= dot
+                r <= outer && r >= inner
             });
             if covered > 0.0 {
                 put(&mut rgba, x, y, paint.fill, covered);
@@ -174,22 +162,37 @@ mod tests {
 
     #[test]
     fn corners_are_transparent_and_disc_is_filled() {
-        let rgba = render(Level::Attention, 0);
+        let rgba = render(Level::Attention, 1);
         assert_eq!(pixel(&rgba, 0, 0)[3], 0);
         assert_eq!(pixel(&rgba, SIZE - 1, SIZE - 1)[3], 0);
-        assert_eq!(pixel(&rgba, SIZE / 2, SIZE / 2), [245, 166, 35, 255]);
+        // Над цифрой — сам кружок.
+        assert_eq!(pixel(&rgba, SIZE / 2, 4), [245, 166, 35, 255]);
         // Край сглажен: есть полупрозрачные пиксели.
         assert!(rgba.chunks(4).any(|p| p[3] > 0 && p[3] < 255));
     }
 
     #[test]
-    fn ring_is_hollow_and_busy_ring_has_a_dot() {
-        let calm = render(Level::Calm, 0);
-        assert_eq!(pixel(&calm, SIZE / 2, SIZE / 2)[3], 0);
-        assert_eq!(pixel(&calm, SIZE / 2, 2)[3], 255);
-        let busy = render(Level::Busy, 0);
-        assert_eq!(pixel(&busy, SIZE / 2, SIZE / 2), [56, 170, 200, 255]);
-        assert_eq!(pixel(&busy, SIZE / 2, 12)[3], 0);
+    fn every_level_with_a_count_is_a_disc_and_without_is_a_ring() {
+        let fills = [
+            (Level::Attention, [245, 166, 35]),
+            (Level::Busy, [33, 118, 199]),
+            (Level::Done, [30, 135, 60]),
+            (Level::Calm, [117, 117, 117]),
+        ];
+        for (level, [r, g, b]) in fills {
+            let disc = render(level, 2);
+            assert_eq!(pixel(&disc, SIZE / 2, 4), [r, g, b, 255], "{level:?}");
+            assert_eq!(pixel(&disc, 8, SIZE / 2), [r, g, b, 255], "{level:?}");
+            let ring = render(level, 0);
+            assert_eq!(pixel(&ring, SIZE / 2, SIZE / 2)[3], 0, "{level:?}");
+            assert_eq!(pixel(&ring, SIZE / 2, 2), [r, g, b, 255], "{level:?}");
+        }
+    }
+
+    #[test]
+    fn working_count_is_white_on_blue() {
+        // «3» — 14 точек шрифта по 4×4 пикселя.
+        assert_eq!(opaque_with(&render(Level::Busy, 3), [255, 255, 255]), 14 * 16);
     }
 
     #[test]

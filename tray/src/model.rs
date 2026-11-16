@@ -106,7 +106,8 @@ pub struct Section {
 pub struct Tray {
     /// Цвет значка.
     pub level: Level,
-    /// Число на значке: сколько ждут или сколько готово; 0 — без числа.
+    /// Число на значке: сколько сессий в группе, которая задала цвет, — ждут, работают,
+    /// готовы или простаивают; 0 — открытых сессий нет, значок без числа.
     pub count: usize,
     /// Сводка: первая строка меню и подсказка значка.
     pub summary: String,
@@ -119,18 +120,21 @@ impl Tray {
     ///
     /// Старшинство то же, что в таблице и панели: сначала те, кто ждёт человека, затем
     /// работающие, затем простаивающие, в конце готовые. По нему же выбирается вид
-    /// значка: готовые красят его, только когда больше ничего не идёт.
+    /// значка: готовые красят его, только когда больше ничего не идёт. Число на значке —
+    /// сколько сессий в группе, которая его покрасила; молчащие считаются с работающими,
+    /// как и в меню.
     pub fn from_rows(rows: &[Row]) -> Tray {
         let counts = Counts::of(rows);
         let idle = rows.iter().filter(|row| row.view == View::Idle).count();
+        let working = counts.working + counts.quiet;
         let (level, count) = if counts.attention > 0 {
             (Level::Attention, counts.attention)
-        } else if counts.working + counts.quiet > 0 {
-            (Level::Busy, 0)
+        } else if working > 0 {
+            (Level::Busy, working)
         } else if counts.done > 0 {
             (Level::Done, counts.done)
         } else {
-            (Level::Calm, 0)
+            (Level::Calm, idle)
         };
         let summary = if rows.is_empty() {
             "Незакрытых сессий нет".to_string()
@@ -295,8 +299,8 @@ mod tests {
             row("d4", Status::Working, "zellij:dev#2", ""),
         ];
         let tray = Tray::from_rows(&rows);
-        // Пока что-то работает, значок — кольцо работы, а не число готовых.
-        assert_eq!((tray.level, tray.count), (Level::Busy, 0));
+        // Пока что-то работает, на значке — сколько работает, а не сколько готово.
+        assert_eq!((tray.level, tray.count), (Level::Busy, 1));
         let titles: Vec<&str> = tray.sections.iter().map(|s| s.title.as_str()).collect();
         assert_eq!(titles, ["Работают: 1", "Простой: 1", "Готово: 2"]);
         assert!(tray.summary.ends_with(" · простой: 1"));
@@ -308,8 +312,19 @@ mod tests {
         let done = Tray::from_rows(&rows[..3]);
         assert_eq!((done.level, done.count), (Level::Done, 2));
         let idle = Tray::from_rows(&rows[2..3]);
-        assert_eq!((idle.level, idle.count), (Level::Calm, 0));
+        assert_eq!((idle.level, idle.count), (Level::Calm, 1));
         assert_ne!(idle.summary, "Незакрытых сессий нет");
+    }
+
+    #[test]
+    fn quiet_sessions_count_as_working() {
+        let mut quiet = row("q1", Status::Working, "zellij:dev#6", "");
+        quiet.session.updated = NOW - 3600;
+        quiet.view = View::Quiet;
+        let rows = [row("w1", Status::Working, "zellij:dev#2", ""), quiet];
+        let tray = Tray::from_rows(&rows);
+        assert_eq!((tray.level, tray.count), (Level::Busy, 2));
+        assert_eq!(tray.sections[0].title, "Работают: 2");
     }
 
     #[test]
