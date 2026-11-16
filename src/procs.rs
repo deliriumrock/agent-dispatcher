@@ -116,13 +116,15 @@ fn claude_process_from(
 
 /// Процесс из `/proc/<pid>/stat`.
 #[derive(Clone, Debug)]
-struct Proc {
-    pid: u32,
-    ppid: u32,
+pub(crate) struct Proc {
+    /// Номер процесса.
+    pub(crate) pid: u32,
+    /// Номер родителя.
+    pub(crate) ppid: u32,
     /// Имя программы, обрезанное ядром до 15 байт.
-    comm: String,
+    pub(crate) comm: String,
     /// Время запуска в тиках с загрузки системы.
-    start: u64,
+    pub(crate) start: u64,
 }
 
 /// Снимок процессов системы.
@@ -142,7 +144,8 @@ impl Procs {
         Self::scan_in(Path::new("/proc"), rustix::param::clock_ticks_per_second())
     }
 
-    fn scan_in(root: &Path, ticks: u64) -> Self {
+    /// Снимок `/proc` в каталоге `root`; `ticks` — тиков в секунде.
+    pub(crate) fn scan_in(root: &Path, ticks: u64) -> Self {
         let list: Vec<Proc> = fs::read_dir(root)
             .map(|entries| {
                 entries
@@ -176,7 +179,9 @@ impl Procs {
     /// Что делает сессия, если её считать молчащей.
     pub fn activity(&self, session: &Session) -> Activity {
         // Снимок пуст, когда `/proc` нет (macOS): отсутствие процесса там ничего не значит.
-        if self.list.is_empty() {
+        // Сессию в контейнере ведёт наблюдатель (`crate::observe`): номера процессов
+        // контейнера здесь ничего не значат, а жив ли агент, он проверяет сам.
+        if self.list.is_empty() || session.container.is_some() {
             return Activity::Unknown;
         }
         let sid = session.session_id.as_str();
@@ -264,8 +269,18 @@ impl Procs {
     fn command(&self, proc: &Proc) -> Activity {
         Activity::Command {
             text: command_text(&self.cmdline(proc.pid)),
-            since: self.boot + i64::try_from(proc.start / self.ticks).unwrap_or(0),
+            since: self.unix_start(proc),
         }
+    }
+
+    /// Процессы снимка.
+    pub(crate) fn list(&self) -> &[Proc] {
+        &self.list
+    }
+
+    /// Время запуска процесса в unix-секундах.
+    pub(crate) fn unix_start(&self, proc: &Proc) -> i64 {
+        self.boot + i64::try_from(proc.start / self.ticks).unwrap_or(0)
     }
 
     fn get(&self, pid: u32) -> Option<&Proc> {
@@ -274,7 +289,8 @@ impl Procs {
             .and_then(|index| self.list.get(*index))
     }
 
-    fn dir(&self, pid: u32) -> PathBuf {
+    /// Каталог процесса в `/proc`.
+    pub(crate) fn dir(&self, pid: u32) -> PathBuf {
         self.root.join(pid.to_string())
     }
 
@@ -283,7 +299,7 @@ impl Procs {
     }
 
     /// Окружение процесса; пустое, если его нельзя прочитать (чужой процесс).
-    fn environ(&self, pid: u32) -> HashMap<String, String> {
+    pub(crate) fn environ(&self, pid: u32) -> HashMap<String, String> {
         fs::read(self.dir(pid).join("environ"))
             .map(|bytes| {
                 bytes

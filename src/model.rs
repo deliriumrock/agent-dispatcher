@@ -219,6 +219,10 @@ pub struct Session {
     /// сессия давно молчит.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<AgentProcess>,
+    /// Контейнер, в котором идёт сессия (начало его идентификатора), если её ведёт
+    /// наблюдатель (`crate::observe`), а не хуки.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
     /// Поля, которых эта версия не знает.
     #[serde(flatten)]
     pub extra: Map<String, Value>,

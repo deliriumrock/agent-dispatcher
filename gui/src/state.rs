@@ -8,9 +8,10 @@ use std::time::SystemTime;
 use chrono::Local;
 use disp::board::{self, Accepted, Board, Counts, Row, Sort, Tone, short_place};
 use disp::config::{self, Paths};
+use disp::observe;
 use disp::model::View;
 use disp::panes;
-use disp::store::{self, Signature};
+use disp::store::{self, Signature, Store};
 use disp::text::{age, latin_key};
 use disp::timeline::{History, Window, span_label};
 use slint::{ModelRc, SharedString, VecModel};
@@ -116,7 +117,11 @@ impl State {
     /// Состояние по файлам диспетчера. Заодно исправляет записи прежних версий.
     pub fn new() -> Self {
         board::repair_roots(&Board::load());
-        State::empty(Paths::from_env())
+        let paths = Paths::from_env();
+        // Агенты в контейнерах: фоновый поток записывает перемены у них в файлы сессий,
+        // а окно видит их, как события хуков, не дожидаясь `docker exec`.
+        observe::watch(Store::new(paths.clone()));
+        State::empty(paths)
     }
 
     fn empty(paths: Paths) -> Self {

@@ -11,6 +11,7 @@ use std::time::Duration;
 use disp::board::Board;
 use disp::config;
 use disp::notify;
+use disp::observe;
 use disp::store::{self, Signature, Store};
 use tray_icon::menu::MenuEvent;
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -56,6 +57,9 @@ pub struct App {
 impl App {
     /// Значок по файлам диспетчера; на экране он появится после `show`.
     pub fn new(store: Store) -> Self {
+        // Агенты в контейнерах: фоновый поток записывает перемены у них в файлы сессий,
+        // а значок видит их, как события хуков, не дожидаясь `docker exec`.
+        observe::watch(store.clone());
         App {
             store,
             tray: Tray::default(),
