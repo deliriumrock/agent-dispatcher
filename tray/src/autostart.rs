@@ -36,6 +36,7 @@ pub fn enable() -> u8 {
             // значок не нашёл бы zellij.
             launch_agent(&exe, &env::var("PATH").unwrap_or_default())
         } else {
+            desktop_path_problem(&exe).map_or(Ok(()), |problem| Err(io::Error::other(problem)))?;
             desktop_entry(&exe)
         };
         if let Some(dir) = path.parent() {
@@ -98,6 +99,22 @@ fn desktop_entry(exe: &Path) -> String {
     )
 }
 
+/// Почему программу по пути `exe` нельзя запускать из файла `.desktop`.
+///
+/// Знак `%` начинает полевой код (`%f`, `%u`). По спецификации сам знак пишется `%%`,
+/// но GNOME (Gio) такой файл не загружает вовсе: он проверяет, что программа из `Exec=`
+/// существует, не раскрывая `%%`. А без экранирования Gio вырезает `%f` из пути
+/// и запускает несуществующую программу. Надёжного способа нет — путь отвергается.
+fn desktop_path_problem(exe: &Path) -> Option<String> {
+    exe.to_string_lossy().contains('%').then(|| {
+        format!(
+            "в пути {} есть знак %, а с ним рабочий стол программу из автозапуска не \
+             запустит; поставь её в другой каталог (make install-tray — в ~/.local/bin)",
+            exe.display()
+        )
+    })
+}
+
 /// Путь программы для строки `Exec=`: в кавычках, с экранированием по спецификации
 /// Desktop Entry, если в нём есть пробелы или особые знаки.
 fn exec_quote(path: &str) -> String {
@@ -107,7 +124,8 @@ fn exec_quote(path: &str) -> String {
     }
     let mut out = String::from("\"");
     // Внутри кавычек знак экранируется обратной косой чертой, а сама черта в значении
-    // файла `.desktop` удваивается ещё раз.
+    // файла `.desktop` удваивается ещё раз. `%` начинает полевой код (`%f`, `%u`) даже
+    // в кавычках, поэтому сам знак пишется как `%%`.
     for ch in path.chars() {
         match ch {
             '"' | '`' | '$' => {
@@ -115,6 +133,7 @@ fn exec_quote(path: &str) -> String {
                 out.push(ch);
             }
             '\\' => out.push_str("\\\\\\\\"),
+            '%' => out.push_str("%%"),
             _ => out.push(ch),
         }
     }
@@ -175,6 +194,19 @@ mod tests {
     fn exec_paths_with_spaces_are_quoted() {
         assert_eq!(exec_quote("/a b/disp-tray"), "\"/a b/disp-tray\"");
         assert_eq!(exec_quote("/a$b/x"), "\"/a\\\\$b/x\"");
+    }
+
+    #[test]
+    fn percent_is_not_a_field_code() {
+        assert_eq!(exec_quote("/tmp/build%f/disp-tray"), "\"/tmp/build%%f/disp-tray\"");
+        assert_eq!(exec_quote("/a%%b"), "\"/a%%%%b\"");
+    }
+
+    #[test]
+    fn paths_with_percent_are_refused() {
+        let problem = desktop_path_problem(Path::new("/tmp/build%f/disp-tray"));
+        assert!(problem.is_some_and(|text| text.contains("build%f")));
+        assert!(desktop_path_problem(Path::new("/home/u/.local/bin/disp-tray")).is_none());
     }
 
     #[test]
