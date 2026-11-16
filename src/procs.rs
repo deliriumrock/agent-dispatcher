@@ -175,6 +175,10 @@ impl Procs {
 
     /// Что делает сессия, если её считать молчащей.
     pub fn activity(&self, session: &Session) -> Activity {
+        // Снимок пуст, когда `/proc` нет (macOS): отсутствие процесса там ничего не значит.
+        if self.list.is_empty() {
+            return Activity::Unknown;
+        }
         let sid = session.session_id.as_str();
         match session.agent.as_str() {
             "claude" => self.claude_command(sid).unwrap_or(match session.process {
@@ -544,6 +548,22 @@ mod tests {
         );
         assert_eq!(
             procs.activity(&session("gemini", "g1", "/w", "zellij:dev#1")),
+            Activity::Unknown
+        );
+    }
+
+    #[test]
+    fn without_proc_nothing_is_known() {
+        // Так выглядит система без `/proc`, например macOS: процессов не видно вовсе.
+        let procs = Procs::scan_in(Path::new("/nonexistent/disp-proc"), 100);
+        let mut claude = session("claude", "s1", "/w", "zellij:dev#4");
+        claude.process = Some(AgentProcess {
+            pid: 100,
+            start: 50,
+        });
+        assert_eq!(procs.activity(&claude), Activity::Unknown);
+        assert_eq!(
+            procs.activity(&session("codex", "t1", "/w", "zellij:dev#3")),
             Activity::Unknown
         );
     }

@@ -6,7 +6,7 @@ use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
@@ -520,15 +520,62 @@ pub fn gui(args: &[String]) -> u8 {
 }
 
 /// Программа графической оболочки: `DISP_GUI_BIN`, рядом с самой `disp`, в `PATH`.
-fn gui_program(board: &Board) -> Option<PathBuf> {
+pub fn gui_program(board: &Board) -> Option<PathBuf> {
     if let Some(path) = board.settings.get("DISP_GUI_BIN") {
         return Some(PathBuf::from(path));
     }
+    companion("disp-gui")
+}
+
+/// Программа из той же поставки, что `disp`: рядом с ней, а если там нет — в `PATH`.
+pub fn companion(name: &str) -> Option<PathBuf> {
     let beside = env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("disp-gui")))
+        .and_then(|exe| exe.parent().map(|dir| dir.join(name)))
         .filter(|path| path.is_file());
-    beside.or_else(|| which("disp-gui"))
+    beside.or_else(|| which(name))
+}
+
+/// `disp tray [ключи]`: значок в трее.
+///
+/// Без ключей запускает `disp-tray` в фоне, отдельно от терминала, и сразу возвращается;
+/// если значок уже в трее, второй не запускается. С ключами (`--autostart` и другие)
+/// передаёт их `disp-tray` и заменяется им.
+pub fn tray(args: &[String]) -> u8 {
+    let Some(program) = companion("disp-tray") else {
+        warn("disp tray: не найдена программа disp-tray (собрать и поставить: make install-tray)");
+        return 1;
+    };
+    if !args.is_empty() {
+        let err = Command::new(&program).args(args).exec();
+        warn(&format!("disp tray: не удалось запустить: {err}"));
+        return 1;
+    }
+    match Board::load().store.tray_lock() {
+        Ok(Some(_free)) => {}
+        Ok(None) => {
+            emit("disp tray: значок уже в трее\n");
+            return 0;
+        }
+        Err(err) => warn(&format!("disp tray: не проверить, запущен ли значок: {err}")),
+    }
+    // Своя группа процессов: закрытие терминала и Ctrl+C до значка не доходят.
+    let started = Command::new(&program)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn();
+    match started {
+        Ok(child) => {
+            emit(&format!("disp tray: значок в трее запущен (pid {})\n", child.id()));
+            0
+        }
+        Err(err) => {
+            warn(&format!("disp tray: не удалось запустить: {err}"));
+            1
+        }
+    }
 }
 
 /// Программа term-everything: `DISP_TERM_EVERYTHING` или `term-everything` в `PATH`.
@@ -660,7 +707,7 @@ pub fn doctor() -> u8 {
         "настройки: {}{conf_note}\n",
         paths.conf_file.display()
     ));
-    for tool in ["notify-send", "curl", "zellij"] {
+    for tool in [crate::notify::DESKTOP_TOOL, "curl", "zellij"] {
         let mark = if which(tool).is_some() {
             "ok "
         } else {
@@ -731,7 +778,9 @@ pub fn usage() -> String {
   disp watch --plain [сек]   таблица без управления, обновляется раз в N секунд
   disp gui           графическая оболочка: в панели терминала через term-everything,
                      с ключом --window — обычным окном на рабочем столе
-  disp show <id>     подробности: промпт, последний ответ, подзадачи
+  disp tray          значок в трее (Linux, macOS): кто ждёт, кнопки «да», «перейти»,
+                     «убрать»; --autostart — запускать при входе, --no-autostart — нет
+  disp show <id>    подробности: промпт, последний ответ, подзадачи
   disp ok <id|задача>...   убрать из списка: результат посмотрел
   disp ok --ended    убрать все закрытые сессии; --done: все законченные
   disp ok -f <id>    убрать активную сессию (если она на самом деле мертва)

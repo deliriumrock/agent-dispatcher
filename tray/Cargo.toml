@@ -1,0 +1,18 @@
+[package]
+name = "disp-tray"
+version.workspace = true
+edition = "2024"
+description = "Значок диспетчера сессий AI-агентов в трее: Linux и macOS"
+publish = false
+
+[dependencies]
+disp = { path = ".." }
+
+# Linux: значок по D-Bus (StatusNotifierItem) через ksni, без GTK и libappindicator.
+[target.'cfg(target_os = "linux")'.dependencies]
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
+
+# macOS: строка меню AppKit; цикл событий главного потока ведёт tao.
+[target.'cfg(target_os = "macos")'.dependencies]
+tray-icon = "0.26"
+tao = "0.37"

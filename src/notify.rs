@@ -26,14 +26,8 @@ pub fn send(note: &Note, settings: &Settings) {
     if let Some(command) = settings.get("DISP_NOTIFY_CMD") {
         spawn(Command::new(command).arg(&note.text).arg(&note.title), None);
     }
-    if settings.get("DISP_DESKTOP") != Some("0") && which("notify-send").is_some() {
-        spawn(
-            Command::new("notify-send")
-                .args(["-a", "disp", "--"])
-                .arg(&note.text)
-                .arg(&note.title),
-            None,
-        );
+    if settings.get("DISP_DESKTOP") != Some("0") {
+        desktop(&note.text, &note.title);
     }
     // В Telegram уходит только строка статуса. Токен передаётся через stdin,
     // чтобы его не было видно в списке процессов.
@@ -51,6 +45,39 @@ pub fn send(note: &Note, settings: &Settings) {
             Some(config.as_bytes()),
         );
     }
+}
+
+/// Программа, которой показываются уведомления на рабочем столе: `notify-send` на Linux,
+/// `osascript` на macOS.
+pub const DESKTOP_TOOL: &str = if cfg!(target_os = "macos") {
+    "osascript"
+} else {
+    "notify-send"
+};
+
+/// Показывает уведомление на рабочем столе: `text` — заголовок, `title` — текст под ним.
+/// Возвращает, нашлась ли программа для показа.
+pub fn desktop(text: &str, title: &str) -> bool {
+    if which(DESKTOP_TOOL).is_none() {
+        return false;
+    }
+    let mut command = Command::new(DESKTOP_TOOL);
+    if cfg!(target_os = "macos") {
+        // Строки уходят сценарию аргументами, а не внутрь его исходника: кавычки
+        // в названии сессии не ломают сценарий.
+        command
+            .args(["-e", "on run argv"])
+            .args([
+                "-e",
+                "display notification (item 2 of argv) with title \"disp\" \
+                 subtitle (item 1 of argv)",
+            ])
+            .args(["-e", "end run"]);
+    } else {
+        command.args(["-a", "disp", "--"]);
+    }
+    spawn(command.arg(text).arg(title), None);
+    true
 }
 
 /// Запускает процесс и не ждёт его. Ошибка запуска не мешает обработке события.

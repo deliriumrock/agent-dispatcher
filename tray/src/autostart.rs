@@ -1,0 +1,187 @@
+//! Запуск значка при входе в систему: файл `.desktop` в `~/.config/autostart` на Linux,
+//! агент launchd в `~/Library/LaunchAgents` на macOS.
+
+use std::env;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+/// Имя агента launchd и файла `.desktop`.
+const NAME: &str = "disp-tray";
+
+/// Где лежит файл автозапуска на этой системе.
+fn location() -> io::Result<PathBuf> {
+    let home = env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::other("не задан HOME"))?;
+    Ok(if cfg!(target_os = "macos") {
+        home.join(format!("Library/LaunchAgents/local.{NAME}.plist"))
+    } else {
+        env::var_os("XDG_CONFIG_HOME")
+            .filter(|dir| !dir.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"))
+            .join(format!("autostart/{NAME}.desktop"))
+    })
+}
+
+/// `disp-tray --autostart`: запускать значок при входе в систему.
+pub fn enable() -> u8 {
+    let result = (|| -> io::Result<PathBuf> {
+        let exe = env::current_exe()?.canonicalize()?;
+        let path = location()?;
+        let text = if cfg!(target_os = "macos") {
+            // У агентов launchd свой короткий PATH, без Homebrew: без нынешнего PATH
+            // значок не нашёл бы zellij.
+            launch_agent(&exe, &env::var("PATH").unwrap_or_default())
+        } else {
+            desktop_entry(&exe)
+        };
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        fs::write(&path, text)?;
+        Ok(path)
+    })();
+    match result {
+        Ok(path) => {
+            println!(
+                "disp-tray: значок будет запускаться при входе в систему ({})",
+                path.display()
+            );
+            0
+        }
+        Err(err) => {
+            eprintln!("disp-tray: автозапуск не настроен: {err}");
+            1
+        }
+    }
+}
+
+/// `disp-tray --no-autostart`: больше не запускать значок при входе.
+pub fn disable() -> u8 {
+    let path = match location() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("disp-tray: {err}");
+            return 1;
+        }
+    };
+    match fs::remove_file(&path) {
+        Ok(()) => {
+            println!("disp-tray: автозапуск снят ({})", path.display());
+            0
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            println!("disp-tray: автозапуск и не был настроен");
+            0
+        }
+        Err(err) => {
+            eprintln!("disp-tray: не удалось удалить {}: {err}", path.display());
+            1
+        }
+    }
+}
+
+/// Файл автозапуска рабочего стола Linux.
+fn desktop_entry(exe: &Path) -> String {
+    format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=disp tray\n\
+         Comment=Значок диспетчера сессий AI-агентов\n\
+         Exec={}\n\
+         NoDisplay=true\n\
+         X-GNOME-Autostart-enabled=true\n",
+        exec_quote(&exe.to_string_lossy())
+    )
+}
+
+/// Путь программы для строки `Exec=`: в кавычках, с экранированием по спецификации
+/// Desktop Entry, если в нём есть пробелы или особые знаки.
+fn exec_quote(path: &str) -> String {
+    let plain = |ch: char| ch.is_alphanumeric() || "/._-+".contains(ch);
+    if path.chars().all(plain) {
+        return path.to_string();
+    }
+    let mut out = String::from("\"");
+    // Внутри кавычек знак экранируется обратной косой чертой, а сама черта в значении
+    // файла `.desktop` удваивается ещё раз.
+    for ch in path.chars() {
+        match ch {
+            '"' | '`' | '$' => {
+                out.push_str("\\\\");
+                out.push(ch);
+            }
+            '\\' => out.push_str("\\\\\\\\"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Агент launchd: запустить значок при входе, с заданным `PATH`.
+fn launch_agent(exe: &Path, path_var: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>local.{NAME}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{}</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>{}</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+</dict>
+</plist>
+"#,
+        xml_escape(&exe.to_string_lossy()),
+        xml_escape(path_var)
+    )
+}
+
+/// Экранирует текст для XML.
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_entry_runs_the_program() {
+        let text = desktop_entry(Path::new("/home/u/.local/bin/disp-tray"));
+        assert!(text.starts_with("[Desktop Entry]\n"));
+        assert!(text.contains("\nExec=/home/u/.local/bin/disp-tray\n"));
+    }
+
+    #[test]
+    fn exec_paths_with_spaces_are_quoted() {
+        assert_eq!(exec_quote("/a b/disp-tray"), "\"/a b/disp-tray\"");
+        assert_eq!(exec_quote("/a$b/x"), "\"/a\\\\$b/x\"");
+    }
+
+    #[test]
+    fn launch_agent_keeps_path_and_escapes_xml() {
+        let text = launch_agent(Path::new("/Users/u/bin/disp-tray"), "/opt/homebrew/bin:/a&b");
+        assert!(text.contains("<string>/Users/u/bin/disp-tray</string>"));
+        assert!(text.contains("<string>/opt/homebrew/bin:/a&amp;b</string>"));
+        assert!(text.contains("<key>RunAtLoad</key>\n  <true/>"));
+    }
+}

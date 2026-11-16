@@ -9,14 +9,14 @@ publish = false
 # в `disp`, который хуки агентов запускают на каждое событие. `cargo build` в корне
 # собирает только `disp`; оболочка собирается как `cargo build -p disp-gui`.
 [workspace]
-members = [".", "gui"]
+members = [".", "gui", "tray"]
 default-members = ["."]
 
 # Версия общая для `disp` и `disp-gui`.
 [workspace.package]
 # Третья цифра — номер сборки, показывается тремя знаками: 0.8.1 — это «0.8.001».
 # Повышается командой `make bump` перед каждой сборкой, которая уходит в работу.
-version = "0.8.5"
+version = "0.8.6"
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

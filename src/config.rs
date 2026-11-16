@@ -98,6 +98,11 @@ impl Paths {
         self.state_dir.join("lock")
     }
 
+    /// Замок запущенного значка в трее.
+    pub fn tray_lock(&self) -> PathBuf {
+        self.state_dir.join("tray.lock")
+    }
+
     /// Сырые события хуков; пишутся только при `DISP_DEBUG=1`.
     pub fn payloads(&self) -> PathBuf {
         self.state_dir.join("payloads.tsv")
