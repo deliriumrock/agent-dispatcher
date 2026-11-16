@@ -117,6 +117,24 @@ impl Store {
         }
     }
 
+    /// Замок значка в трее: его держит запущенный `disp-tray`, чтобы второй не появился.
+    /// `Ok(None)` — замок уже держит другой процесс. Замок снимается, когда возвращённый
+    /// файл закрывается, в том числе при падении процесса.
+    pub fn tray_lock(&self) -> Result<Option<File>> {
+        self.ensure_dirs()?;
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(self.paths.tray_lock())?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(file)),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(err)) => Err(err.into()),
+        }
+    }
+
     /// Дописывает запись в журнал смен статуса.
     pub fn append_event(&self, event: &JournalEvent) -> Result<()> {
         let mut line = serde_json::to_string(event)?;

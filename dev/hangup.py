@@ -53,7 +53,10 @@ def wait_exit(pid: int, poll) -> str:
 
 def main() -> int:
     disp, state, conf = sys.argv[1:4]
-    env = dict(os.environ, DISP_STATE_DIR=state, DISP_CONFIG=conf, TERM="xterm-256color")
+    # DISP_TRAY=0: панель не должна показывать значок в трее рабочего стола.
+    env = dict(
+        os.environ, DISP_STATE_DIR=state, DISP_CONFIG=conf, DISP_TRAY="0", TERM="xterm-256color"
+    )
     for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
         env.pop(key, None)
 

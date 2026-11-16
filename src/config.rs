@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Ключи, которые читаются из файла настроек. Остальные строки файла игнорируются:
 /// файл не исполняется и не может задать произвольную переменную.
-const CONF_KEYS: [&str; 13] = [
+const CONF_KEYS: [&str; 15] = [
     "DISP_TG_TOKEN",
     "DISP_TG_CHAT",
     "DISP_NOTIFY_CMD",
@@ -22,6 +22,8 @@ const CONF_KEYS: [&str; 13] = [
     "DISP_PANE_LABEL",
     "DISP_TERM_EVERYTHING",
     "DISP_GUI_BIN",
+    "DISP_TRAY",
+    "DISP_TRAY_BIN",
 ];
 
 /// Непустое значение переменной окружения. Пустая строка считается отсутствием,
@@ -96,6 +98,16 @@ impl Paths {
     /// Файл блокировки, общий с bash-версией.
     pub fn lock(&self) -> PathBuf {
         self.state_dir.join("lock")
+    }
+
+    /// Замок запущенного значка в трее.
+    pub fn tray_lock(&self) -> PathBuf {
+        self.state_dir.join("tray.lock")
+    }
+
+    /// Журнал ошибок значка в трее, запущенного через `disp`.
+    pub fn tray_log(&self) -> PathBuf {
+        self.state_dir.join("tray.log")
     }
 
     /// Сырые события хуков; пишутся только при `DISP_DEBUG=1`.
