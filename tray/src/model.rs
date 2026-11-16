@@ -138,10 +138,8 @@ impl Tray {
         };
         let summary = if rows.is_empty() {
             "Незакрытых сессий нет".to_string()
-        } else if idle > 0 {
-            format!("{} · простой: {idle}", counts.line())
         } else {
-            counts.line()
+            counts.line_with_idle(idle)
         };
         let groups: [(&str, &[View]); 4] = [
             ("Ждут тебя", &[View::Wait, View::Err, View::Lost, View::Stuck]),
@@ -303,7 +301,11 @@ mod tests {
         assert_eq!((tray.level, tray.count), (Level::Busy, 1));
         let titles: Vec<&str> = tray.sections.iter().map(|s| s.title.as_str()).collect();
         assert_eq!(titles, ["Работают: 1", "Простой: 1", "Готово: 2"]);
-        assert!(tray.summary.ends_with(" · простой: 1"));
+        // Сводка в порядке меню и таблицы; простой — перед готовыми.
+        assert_eq!(
+            tray.summary,
+            "ждут тебя: 0 · работают: 1 · молчат: 0 · простой: 1 · готово: 2"
+        );
         // Простаивающую можно убрать: она не работает.
         assert_eq!(labels(&tray.sections[1].entries[0]), ["Перейти к панели", "Убрать из списка"]);
         // Без названия — только задача и агент.

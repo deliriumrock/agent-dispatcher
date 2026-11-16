@@ -131,7 +131,7 @@ tbl="$("$DISP" ls)"
 echo "$tbl" | sed 's/^/     | /'
 check "строки не шире терминала" "0" "$(echo "$tbl" | jq -R --argjson w "$COLUMNS" 'select(length > $w)' | wc -l)"
 check "при узкой панели тоже" "0" "$(COLUMNS=96 "$DISP" ls | jq -R 'select(length > 96)' | wc -l)"
-has "сводка" "ждут тебя: 1 · готово: 3 · работают: 0 · молчат: 0" "$tbl"
+has "сводка" "ждут тебя: 1 · работают: 0 · молчат: 0 · готово: 3" "$tbl"
 check "первой идёт ждущая сессия" "0c0de1" "$(echo "$tbl" | sed -n 3p | awk '{print $1}')"
 has "короткие ID различают сессии с общим префиксом UUIDv7" "0c0de2" "$tbl"
 has "подзадачи и фон в таблице" "1/3 ф1" "$tbl"
