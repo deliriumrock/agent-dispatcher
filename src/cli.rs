@@ -558,13 +558,19 @@ pub enum TrayStart {
     Failed(String),
 }
 
+/// Код выхода `disp-tray --detach`, когда значок уже в трее.
+pub const TRAY_RUNNING_EXIT: i32 = 3;
+
 /// Показывает значок в трее, если его ещё нет.
 ///
-/// `disp-tray` запускается через промежуточную оболочку, которая сразу выходит: значок
-/// не становится дочерним процессом `disp` и не остаётся зомби, когда его убирают,
-/// а `disp` тем временем ещё работает. Своя группа процессов — закрытие терминала
-/// и Ctrl+C до значка не доходят. Переменные zellij убираются: значок должен вести
-/// себя одинаково, откуда бы его ни запустили, в том числе при входе в систему.
+/// Запускает `disp-tray --detach` и ждёт его: тот запускает сам значок и сразу выходит.
+/// Так значок не становится дочерним процессом `disp` и не остаётся зомби, когда его
+/// убирают, а `disp` тем временем ещё работает. При этом результат честный: ошибку
+/// запуска самой программы (нет файла, нет права на исполнение) возвращает `spawn`,
+/// а ошибку запуска значка — `disp-tray --detach` своим кодом выхода и текстом.
+/// Своя группа процессов — закрытие терминала и Ctrl+C до значка не доходят.
+/// Переменные zellij убираются: значок должен вести себя одинаково, откуда бы его ни
+/// запустили, в том числе при входе в систему.
 pub fn start_tray(board: &Board) -> TrayStart {
     let Some(program) = tray_program(board) else {
         return TrayStart::Missing;
@@ -574,21 +580,28 @@ pub fn start_tray(board: &Board) -> TrayStart {
         Ok(None) => return TrayStart::Running,
         Err(err) => return TrayStart::Failed(format!("не проверить, запущен ли значок: {err}")),
     }
-    let status = Command::new("/bin/sh")
-        .args(["-c", "\"$0\" &"])
-        .arg(&program)
+    let output = Command::new(&program)
+        .arg("--detach")
         .env_remove("ZELLIJ")
         .env_remove("ZELLIJ_SESSION_NAME")
         .env_remove("ZELLIJ_PANE_ID")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .process_group(0)
-        .status();
-    match status {
-        Ok(status) if status.success() => TrayStart::Started,
-        Ok(status) => TrayStart::Failed(format!("оболочка запуска вышла с {status}")),
-        Err(err) => TrayStart::Failed(err.to_string()),
+        .output();
+    match output {
+        Ok(output) if output.status.success() => TrayStart::Started,
+        Ok(output) if output.status.code() == Some(TRAY_RUNNING_EXIT) => TrayStart::Running,
+        Ok(output) => {
+            let said = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            TrayStart::Failed(if said.is_empty() {
+                format!("{} вышла с {}", program.display(), output.status)
+            } else {
+                said
+            })
+        }
+        Err(err) => TrayStart::Failed(format!("{}: {err}", program.display())),
     }
 }
 

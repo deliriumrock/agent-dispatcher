@@ -105,6 +105,11 @@ impl Paths {
         self.state_dir.join("tray.lock")
     }
 
+    /// Журнал ошибок значка в трее, запущенного через `disp`.
+    pub fn tray_log(&self) -> PathBuf {
+        self.state_dir.join("tray.log")
+    }
+
     /// Сырые события хуков; пишутся только при `DISP_DEBUG=1`.
     pub fn payloads(&self) -> PathBuf {
         self.state_dir.join("payloads.tsv")
