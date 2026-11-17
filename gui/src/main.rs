@@ -15,6 +15,7 @@ use slint::platform::Key;
 use slint::{ComponentHandle, PhysicalSize, SharedString, Timer, TimerMode};
 
 use crate::state::{Outcome, State};
+use disp::{t, tr};
 
 slint::include_modules!();
 
@@ -24,11 +25,20 @@ const POLL: Duration = Duration::from_millis(250);
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "-h" || arg == "--help") {
+        let version = disp::VERSION;
         println!(
-            "disp-gui {} — графическая оболочка диспетчера сессий\n\n  \
-             disp-gui               открыть окно\n  \
-             disp-gui --size ШxВ    окно заданного размера в пикселях\n",
-            disp::VERSION
+            "{}",
+            tr!(
+                "disp-gui {version} — graphical shell of the session dispatcher\n\n  \
+                 disp-gui               open the window\n  \
+                 disp-gui --size WxH    a window of the given size in pixels\n",
+                "disp-gui {version} — графическая оболочка диспетчера сессий\n\n  \
+                 disp-gui               открыть окно\n  \
+                 disp-gui --size ШxВ    окно заданного размера в пикселях\n",
+                "disp-gui {version} — графічна оболонка диспетчера сесій\n\n  \
+                 disp-gui               відкрити вікно\n  \
+                 disp-gui --size ШxВ    вікно заданого розміру в пікселях\n"
+            )
         );
         return ExitCode::SUCCESS;
     }
@@ -54,6 +64,38 @@ fn window_size(args: &[String]) -> Option<PhysicalSize> {
     ))
 }
 
+/// Ставит надписи окна на языке интерфейса.
+fn set_texts(texts: &Texts) {
+    texts.set_waiting(t!("waiting", "ждут тебя", "чекають на тебе").into());
+    texts.set_working(t!("working", "работают", "працюють").into());
+    texts.set_quiet(t!("quiet", "молчат", "мовчать").into());
+    texts.set_done(t!("done", "готово", "готово").into());
+    texts.set_all(t!("all", "все", "усі").into());
+    texts.set_sort(t!("sort", "сорт", "сорт.").into());
+    texts.set_no_sessions(t!("No sessions.", "Сессий нет.", "Сесій немає.").into());
+    texts.set_no_open_sessions(
+        t!(
+            "No open sessions.  Tab shows removed ones too.",
+            "Незакрытых сессий нет.  Tab покажет и убранные.",
+            "Незакритих сесій немає.  Tab покаже й прибрані."
+        )
+        .into(),
+    );
+    texts.set_approve(t!("Approve", "Принять", "Прийняти").into());
+    texts.set_remove(t!("Remove", "Убрать", "Прибрати").into());
+    texts.set_focus(t!("Go to", "Перейти", "Перейти").into());
+    texts.set_rename(t!("Name", "Назвать", "Назвати").into());
+    texts.set_name_prompt(t!("name:", "название:", "назва:").into());
+    texts.set_name_placeholder(
+        t!(
+            "Enter — save, empty line — cancel",
+            "Enter — сохранить, пустая строка — отмена",
+            "Enter — зберегти, порожній рядок — скасувати"
+        )
+        .into(),
+    );
+}
+
 /// Создаёт окно, связывает его с состоянием и крутит цикл событий.
 fn run(size: Option<PhysicalSize>) -> Result<(), slint::PlatformError> {
     let app = AppWindow::new()?;
@@ -61,6 +103,7 @@ fn run(size: Option<PhysicalSize>) -> Result<(), slint::PlatformError> {
         app.window().set_size(size);
     }
     app.set_version(disp::VERSION.into());
+    set_texts(&app.global::<Texts>());
 
     let state = Rc::new(RefCell::new(State::new()));
     state.borrow_mut().reload();

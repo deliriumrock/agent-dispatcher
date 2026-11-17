@@ -3,10 +3,13 @@
 use tray_icon::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 
 use crate::model::{Action, Tray};
+use disp::{t, tr};
 
 /// Строит меню: сводка, группы сессий с подменю, внизу — панель и выход.
 pub fn build(tray: &Tray) -> Result<Menu, String> {
-    build_menu(tray).map_err(|err| format!("меню не построено: {err}"))
+    build_menu(tray).map_err(|err| {
+        tr!("menu not built: {err}", "меню не построено: {err}", "меню не побудовано: {err}")
+    })
 }
 
 fn build_menu(tray: &Tray) -> tray_icon::menu::Result<Menu> {
@@ -29,12 +32,23 @@ fn build_menu(tray: &Tray) -> tray_icon::menu::Result<Menu> {
             menu.append(&sub)?;
         }
         if section.more > 0 {
-            menu.append(&note(&format!("…и ещё {} — в панели", section.more)))?;
+            let more = section.more;
+            menu.append(&note(&tr!(
+                "…and {more} more — in the panel",
+                "…и ещё {more} — в панели",
+                "…і ще {more} — у панелі"
+            )))?;
         }
     }
     menu.append(&PredefinedMenuItem::separator())?;
-    menu.append(&button("Открыть панель", &Action::Open))?;
-    menu.append(&button("Убрать значок", &Action::Quit))?;
+    menu.append(&button(
+        t!("Open the panel", "Открыть панель", "Відкрити панель"),
+        &Action::Open,
+    ))?;
+    menu.append(&button(
+        t!("Remove the icon", "Убрать значок", "Прибрати значок"),
+        &Action::Quit,
+    ))?;
     Ok(menu)
 }
 

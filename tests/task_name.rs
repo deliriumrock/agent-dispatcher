@@ -36,6 +36,8 @@ impl Sandbox {
         let mut command = Command::new(env!("CARGO_BIN_EXE_disp"));
         command
             .args(args)
+            // Ожидания тестов написаны по-русски.
+            .env("DISP_LANG", "ru")
             .env("DISP_STATE_DIR", self.dir.join("state"))
             .env("DISP_CONFIG", self.dir.join("env"))
             .env("DISP_CODEX_INDEX", self.dir.join("codex-index.jsonl"))

@@ -16,6 +16,7 @@ use crate::board::{self, Row, Sort, SortKey, Tone, or_question, short_place, sta
 use crate::model::{Status, View};
 use crate::text::{age, clip_cells, fit, local_time, width, wrap};
 use crate::timeline::{self, Phase, Segment, Window, span_label};
+use crate::{t, tr};
 
 /// Меньше этого панель не рисуется.
 const MIN_WIDTH: u16 = 24;
@@ -41,7 +42,10 @@ pub fn draw(frame: &mut Frame, app: &mut App, clock: &str) {
     let area = frame.area();
     app.lanes.clear();
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
-        frame.render_widget(Line::from("disp: мало места"), area);
+        frame.render_widget(
+            Line::from(t!("disp: not enough room", "disp: мало места", "disp: замало місця")),
+            area,
+        );
         return;
     }
     let header = Rect { height: 1, ..area };
@@ -161,7 +165,11 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, clock: &str) {
         Span::styled(text(count, long, short), style)
     };
     let gap = || Span::styled(if wide { " · " } else { "  " }, bar_muted());
-    let waiting = text(counts.attention, "ждут тебя", "!");
+    let waiting = text(
+        counts.attention,
+        t!("waiting", "ждут тебя", "чекають на тебе"),
+        "!",
+    );
     let alarm = alarm_style(View::Wait).filter(|_| counts.attention > 0);
     let mut spans = match alarm {
         // Плашка начинается от самого края полосы; после неё разделитель не нужен.
@@ -173,15 +181,20 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, clock: &str) {
     };
     // Порядок — как в таблице: ждут, работают, молчат, готово.
     spans.extend([
-        part(counts.working, "работают", "●", View::Work),
+        part(
+            counts.working,
+            t!("working", "работают", "працюють"),
+            "●",
+            View::Work,
+        ),
         gap(),
-        part(counts.quiet, "молчат", "?", View::Quiet),
+        part(counts.quiet, t!("quiet", "молчат", "мовчать"), "?", View::Quiet),
         gap(),
-        part(counts.done, "готово", "✓", View::Done),
+        part(counts.done, t!("done", "готово", "готово"), "✓", View::Done),
     ]);
     if app.show_all {
         spans.push(gap());
-        spans.push(Span::styled("все", bar_key()));
+        spans.push(Span::styled(t!("all", "все", "усі"), bar_key()));
     }
     let left = Line::from(spans);
     // Плашка занимает и отступ слева, поэтому строка с ней рисуется от края полосы.
@@ -192,7 +205,10 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, clock: &str) {
     frame.render_widget(left, spot);
 
     // Сортировка не по умолчанию видна всегда: в узкой панели у списка нет заголовка колонок.
-    let sort = (app.sort != Sort::default()).then(|| format!("сорт: {}", app.sort.label()));
+    let sort = (app.sort != Sort::default()).then(|| {
+        let sort = app.sort.label();
+        tr!("sort: {sort}", "сорт: {sort}", "сорт.: {sort}")
+    });
     let brand = format!("disp {VERSION}");
     let candidates: Vec<Vec<(&str, Style)>> = match &sort {
         Some(sort) => vec![
@@ -235,9 +251,13 @@ fn draw_board(frame: &mut Frame, area: Rect, app: &mut App) {
     if app.rows.is_empty() {
         app.page = 1;
         let hint = if app.show_all {
-            "Сессий нет."
+            t!("No sessions.", "Сессий нет.", "Сесій немає.")
         } else {
-            "Незакрытых сессий нет.  Tab покажет и убранные."
+            t!(
+                "No open sessions.  Tab shows removed ones too.",
+                "Незакрытых сессий нет.  Tab покажет и убранные.",
+                "Незакритих сесій немає.  Tab покаже й прибрані."
+            )
         };
         frame.render_widget(Line::styled(hint, dim()), area);
         return;
@@ -555,19 +575,22 @@ fn column_titles(sort: Sort, what: &str) -> [String; 8] {
             title.to_string()
         }
     };
-    // Колонка возраста шириной в свой заголовок: стрелка встаёт на место последней буквы.
+    // Колонка возраста шириной в четыре знака: у заголовка из четырёх букв стрелка
+    // встаёт на место последней.
+    let age_title = t!("AGE", "ВОЗР", "ВІК");
     let age = if sort.key == SortKey::Age {
-        format!("ВОЗ{arrow}")
+        let letters = age_title.chars().count().min(3);
+        format!("{}{arrow}", age_title.chars().take(letters).collect::<String>())
     } else {
-        "ВОЗР".to_string()
+        age_title.to_string()
     };
     [
         "ID".to_string(),
-        mark(SortKey::Status, "СТАТУС"),
-        mark(SortKey::Agent, "АГЕНТ"),
-        mark(SortKey::Task, "ЗАДАЧА"),
-        "ПОДЗ".to_string(),
-        mark(SortKey::Place, "ГДЕ"),
+        mark(SortKey::Status, t!("STATUS", "СТАТУС", "СТАТУС")),
+        mark(SortKey::Agent, t!("AGENT", "АГЕНТ", "АГЕНТ")),
+        mark(SortKey::Task, t!("TASK", "ЗАДАЧА", "ЗАВДАННЯ")),
+        t!("SUB", "ПОДЗ", "ПІДЗ").to_string(),
+        mark(SortKey::Place, t!("WHERE", "ГДЕ", "ДЕ")),
         age,
         what.to_string(),
     ]
@@ -588,7 +611,12 @@ fn draw_list(frame: &mut Frame, full: Rect, app: &mut App) {
     let header = Rect { height: 1, ..area };
     match shape {
         Shape::Table(columns) => {
-            let titles = column_titles(app.sort, if lane.is_some() { "" } else { "ЧТО" });
+            let what = if lane.is_some() {
+                ""
+            } else {
+                t!("WHAT", "ЧТО", "ЩО")
+            };
+            let titles = column_titles(app.sort, what);
             let titles = titles.each_ref().map(String::as_str);
             frame.render_widget(Line::styled(table_line(columns, titles), bold()), header);
             top += 1;
@@ -755,9 +783,11 @@ fn draw_details(frame: &mut Frame, area: Rect, app: &App, mut lines: Vec<Line<'s
 /// Журнал смен статуса: новые записи сверху.
 fn draw_journal(frame: &mut Frame, area: Rect, app: &mut App, scroll: usize) {
     let cells = usize::from(area.width);
-    let title = format!(
-        "Журнал: смены статуса, новые сверху ({})",
-        app.journal.len()
+    let count = app.journal.len();
+    let title = tr!(
+        "Journal: status changes, newest first ({count})",
+        "Журнал: смены статуса, новые сверху ({count})",
+        "Журнал: зміни статусу, нові згори ({count})"
     );
     frame.render_widget(
         Line::styled(clip_cells(&title, cells), bold()),
@@ -771,7 +801,8 @@ fn draw_journal(frame: &mut Frame, area: Rect, app: &mut App, scroll: usize) {
             height: 1,
             ..area
         };
-        frame.render_widget(Line::styled("Журнал пуст.", dim()), spot.intersection(area));
+        let empty = t!("The journal is empty.", "Журнал пуст.", "Журнал порожній.");
+        frame.render_widget(Line::styled(empty, dim()), spot.intersection(area));
         return;
     }
     let buffer = frame.buffer_mut();
@@ -855,7 +886,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let cells = usize::from(inner.width);
     match &app.mode {
         Mode::Rename { input } => {
-            let prompt = "название: ";
+            let prompt = t!("name: ", "название: ", "назва: ");
             // Длинный ввод показываем с конца: курсор всегда на экране.
             let room = cells.saturating_sub(width(prompt) + 1);
             let mut tail: Vec<char> = Vec::new();
@@ -884,13 +915,15 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                 return;
             };
             let state = if row.session.status == Status::Waiting {
-                "ждёт тебя"
+                t!("waiting for you", "ждёт тебя", "чекає на тебе")
             } else {
-                "работает"
+                t!("working", "работает", "працює")
             };
-            let text = format!(
-                "{} ещё {state}. Убрать из списка всё равно? y — да",
-                row.sid
+            let sid = &row.sid;
+            let text = tr!(
+                "{sid} is still {state}. Remove it from the list anyway? y — yes",
+                "{sid} ещё {state}. Убрать из списка всё равно? y — да",
+                "{sid} ще {state}. Прибрати зі списку все одно? y — так"
             );
             frame.render_widget(Line::styled(clip_cells(&text, cells), base), inner);
         }
@@ -898,10 +931,10 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             let hints = pick_hints(
                 vec![
                     vec![
-                        hint("↑↓ PgUp PgDn", "прокрутка"),
-                        hint("l", "назад к сессиям"),
+                        hint("↑↓ PgUp PgDn", t!("scroll", "прокрутка", "прокрутка")),
+                        hint("l", t!("back to sessions", "назад к сессиям", "назад до сесій")),
                     ],
-                    vec![hint("↑↓", ""), hint("l", "назад")],
+                    vec![hint("↑↓", ""), hint("l", t!("back", "назад", "назад"))],
                 ],
                 cells,
             );
@@ -922,11 +955,14 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             };
             let lane = if app.timeline {
                 vec![
-                    hint("t", &format!("лента {}", span_label(app.span))),
-                    hint("+/-", "масштаб"),
+                    hint("t", &{
+                        let span = span_label(app.span);
+                        tr!("timeline {span}", "лента {span}", "стрічка {span}")
+                    }),
+                    hint("+/-", t!("zoom", "масштаб", "масштаб")),
                 ]
             } else {
-                vec![hint("t", "лента")]
+                vec![hint("t", t!("timeline", "лента", "стрічка"))]
             };
             let with_lane = |before: Vec<Hint>, after: Vec<Hint>| -> Vec<Hint> {
                 before
@@ -935,10 +971,15 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                     .chain(after)
                     .collect()
             };
-            let (up, enter) = (hint("↑↓", "выбор"), hint("Enter", "подробности"));
-            let (approve, remove) = (hint("a", "принять"), hint("x", "убрать"));
-            let go = hint("g", "перейти");
-            let (help, quit) = (hint("?", "справка"), hint("q", "выход"));
+            let up = hint("↑↓", t!("select", "выбор", "вибір"));
+            let enter = hint("Enter", t!("details", "подробности", "подробиці"));
+            let approve = hint("a", t!("approve", "принять", "прийняти"));
+            let remove = hint("x", t!("remove", "убрать", "прибрати"));
+            let go = hint("g", t!("go to", "перейти", "перейти"));
+            let help = hint("?", t!("help", "справка", "довідка"));
+            let quit = hint("q", t!("quit", "выход", "вихід"));
+            let sort = t!("sort", "сортировка", "сортування");
+            let sort_short = t!("sort", "сорт.", "сорт.");
             let variants = vec![
                 with_lane(
                     vec![
@@ -947,11 +988,11 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                         approve.clone(),
                         remove.clone(),
                         go.clone(),
-                        hint("n", "назвать"),
-                        hint("l", "журнал"),
-                        hint("s", "сортировка"),
+                        hint("n", t!("name", "назвать", "назвати")),
+                        hint("l", t!("journal", "журнал", "журнал")),
+                        hint("s", sort),
                     ],
-                    vec![hint("Tab", "все"), help.clone(), quit.clone()],
+                    vec![hint("Tab", t!("all", "все", "усі")), help.clone(), quit.clone()],
                 ),
                 with_lane(
                     vec![
@@ -960,7 +1001,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                         approve.clone(),
                         remove.clone(),
                         go.clone(),
-                        hint("s", "сортировка"),
+                        hint("s", sort),
                     ],
                     vec![help.clone(), quit.clone()],
                 ),
@@ -970,7 +1011,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                         approve.clone(),
                         remove.clone(),
                         go.clone(),
-                        hint("s", "сорт."),
+                        hint("s", sort_short),
                     ],
                     vec![help.clone(), quit],
                 ),
@@ -980,7 +1021,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                         approve.clone(),
                         remove.clone(),
                         go.clone(),
-                        hint("s", "сорт."),
+                        hint("s", sort_short),
                     ],
                     vec![help.clone()],
                 ),
@@ -1020,21 +1061,77 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 
 /// Справка по клавишам поверх панели.
 fn draw_help(frame: &mut Frame, area: Rect) {
-    let keys = [
-        ("↑ ↓  j k", "выбор строки"),
-        ("Enter  d", "подробности выбранной сессии"),
-        ("a", "принять: ответить агенту «да» (Enter в его панели)"),
-        ("x", "убрать из списка: результат посмотрел"),
-        ("u", "вернуть убранную в список"),
-        ("g", "перейти в панель агента (zellij)"),
-        ("n", "дать строке название"),
-        ("l", "журнал смен статуса"),
-        ("s  S", "сортировка: поле и направление"),
-        ("t", "лента времени вместо «ЧТО»"),
-        ("+  -", "масштаб ленты: от 30 минут до суток"),
-        ("Tab", "показать и убранные"),
-        ("r", "перечитать"),
-        ("q  Ctrl-C", "выход"),
+    let keys: [(&str, &str); 14] = [
+        ("↑ ↓  j k", t!("select a row", "выбор строки", "вибір рядка")),
+        (
+            "Enter  d",
+            t!(
+                "details of the selected session",
+                "подробности выбранной сессии",
+                "подробиці вибраної сесії"
+            ),
+        ),
+        (
+            "a",
+            t!(
+                "approve: answer the agent “yes” (Enter in its pane)",
+                "принять: ответить агенту «да» (Enter в его панели)",
+                "прийняти: відповісти агентові «так» (Enter у його панелі)"
+            ),
+        ),
+        (
+            "x",
+            t!(
+                "remove from the list: result reviewed",
+                "убрать из списка: результат посмотрел",
+                "прибрати зі списку: результат переглянуто"
+            ),
+        ),
+        (
+            "u",
+            t!(
+                "bring a removed row back",
+                "вернуть убранную в список",
+                "повернути прибрану до списку"
+            ),
+        ),
+        (
+            "g",
+            t!(
+                "go to the agent pane (zellij)",
+                "перейти в панель агента (zellij)",
+                "перейти до панелі агента (zellij)"
+            ),
+        ),
+        ("n", t!("give the row a name", "дать строке название", "дати рядку назву")),
+        ("l", t!("status journal", "журнал смен статуса", "журнал змін статусу")),
+        (
+            "s  S",
+            t!(
+                "sort: field and direction",
+                "сортировка: поле и направление",
+                "сортування: поле й напрямок"
+            ),
+        ),
+        (
+            "t",
+            t!(
+                "timeline instead of “WHAT”",
+                "лента времени вместо «ЧТО»",
+                "стрічка часу замість «ЩО»"
+            ),
+        ),
+        (
+            "+  -",
+            t!(
+                "timeline zoom: from 30 minutes to a day",
+                "масштаб ленты: от 30 минут до суток",
+                "масштаб стрічки: від 30 хвилин до доби"
+            ),
+        ),
+        ("Tab", t!("show removed ones too", "показать и убранные", "показати й прибрані")),
+        ("r", t!("reload", "перечитать", "перечитати")),
+        ("q  Ctrl-C", t!("quit", "выход", "вихід")),
     ];
     let mut lines: Vec<Line> = keys
         .iter()
@@ -1047,7 +1144,11 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         .collect();
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        " Буквы работают и в русской раскладке.",
+        t!(
+            " Letters also work in the Ukrainian and Russian layouts.",
+            " Буквы работают и в русской, и в украинской раскладке.",
+            " Літери працюють і в українській, і в російській розкладці."
+        ),
         dim(),
     ));
 
@@ -1061,7 +1162,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
     };
     frame.render_widget(Clear, spot);
     frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(" Клавиши ")),
+        Paragraph::new(lines).block(Block::bordered().title(t!(" Keys ", " Клавиши ", " Клавіші "))),
         spot,
     );
 }
@@ -1113,6 +1214,34 @@ mod tests {
         let mut app = App::default();
         app.set_rows(vec![waiting, done, working], 1000);
         app
+    }
+
+    #[test]
+    fn panel_speaks_english_and_ukrainian() {
+        use crate::i18n::{Lang, scoped};
+        let cases = [
+            (
+                Lang::En,
+                " waiting: 1  working: 1 · quiet: 0 · done: 1",
+                "  ID     STATUS▲    AGENT  TASK           SUB  WHERE        AGE  WHAT",
+                "▶ site31 ! WAITING  claude",
+            ),
+            (
+                Lang::Uk,
+                " чекають на тебе: 1  працюють: 1 · мовчать: 0 · готово: 1",
+                "  ID     СТАТУС▲    АГЕНТ  ЗАВДАННЯ       ПІДЗ ДЕ           ВІК  ЩО",
+                "▶ site31 ! ЧЕКАЄ    claude",
+            ),
+        ];
+        for (lang, header, titles, first) in cases {
+            let _lang = scoped(lang);
+            let mut app = app();
+            let lines = screen(&mut app, 110, 8);
+            assert!(lines[0].starts_with(header), "{lang:?}: {}", lines[0]);
+            assert!(lines[0].ends_with(&format!("18:06:12  disp {VERSION}")), "{lang:?}");
+            assert_eq!(lines[1], titles, "{lang:?}");
+            assert!(lines[2].starts_with(first), "{lang:?}: {}", lines[2]);
+        }
     }
 
     #[test]

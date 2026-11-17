@@ -13,6 +13,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use disp::tr;
+
 /// Ключ, с которым `--detach` запускает сам значок. В справке его нет: человеку он не нужен.
 pub const CHILD: &str = "--detached-child";
 
@@ -65,7 +67,11 @@ pub fn report(outcome: &Outcome) {
 /// позже, когда `disp` уже сообщил о неудаче.
 pub fn wait(child: &mut Child, timeout: Duration, log: &Path) -> Outcome {
     let Some(mut pipe) = child.stdout.take() else {
-        return Outcome::Failed("значок запущен без канала для ответа".to_string());
+        return Outcome::Failed(tr!(
+            "the icon was started without a channel for its answer",
+            "значок запущен без канала для ответа",
+            "значок запущено без каналу для відповіді"
+        ));
     };
     let (sender, answer) = mpsc::channel();
     // Поток не держит выход: если ответа нет, `--detach` выйдет и без него.
@@ -83,20 +89,30 @@ pub fn wait(child: &mut Child, timeout: Duration, log: &Path) -> Outcome {
                     .wait()
                     .map_or_else(|err| err.to_string(), |status| status.to_string());
                 Outcome::Failed(if said.is_empty() {
-                    format!("значок вышел ({status}); подробности — в {}", log.display())
+                    let log = log.display();
+                    tr!(
+                        "the icon exited ({status}); details are in {log}",
+                        "значок вышел ({status}); подробности — в {log}",
+                        "значок завершився ({status}); подробиці — у {log}"
+                    )
                 } else {
                     said.to_string()
                 })
             }
         },
-        Ok(Err(err)) => Outcome::Failed(format!("не прочитан ответ значка: {err}")),
+        Ok(Err(err)) => Outcome::Failed(tr!(
+            "the icon answer was not read: {err}",
+            "не прочитан ответ значка: {err}",
+            "відповідь значка не прочитано: {err}"
+        )),
         Err(_) => {
             let _ = child.kill();
             let _ = child.wait();
-            Outcome::Failed(format!(
-                "значок не ответил за {} с и остановлен; подробности — в {}",
-                timeout.as_secs(),
-                log.display()
+            let (seconds, log) = (timeout.as_secs(), log.display());
+            Outcome::Failed(tr!(
+                "the icon did not answer in {seconds} s and was stopped; details are in {log}",
+                "значок не ответил за {seconds} с и остановлен; подробности — в {log}",
+                "значок не відповів за {seconds} с і його зупинено; подробиці — у {log}"
             ))
         }
     }
@@ -110,6 +126,8 @@ mod tests {
 
     /// Запускает `sh -c script` с каналом вместо stdout, как `--detach` запускает значок.
     fn child(script: &str) -> Child {
+        // Ожидания тестов написаны по-русски.
+        disp::i18n::set(disp::i18n::Lang::Ru);
         Command::new("sh")
             .args(["-c", script])
             .stdin(Stdio::null())

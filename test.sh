@@ -6,6 +6,7 @@ T="$(mktemp -d)"
 export DISP_STATE_DIR="$T/state" DISP_CONFIG="$T/env" DISP_DESKTOP=0 DISP_COLOR=0 COLUMNS=140
 export DISP_PANE_TITLE=0   # настоящий zellij в тестах не опрашиваем; раздел 12 подставляет свой
 export DISP_CONTAINERS=0   # агенты в контейнерах этой машины в тестовый список не попадают
+export DISP_LANG=ru   # ожидания написаны по-русски; другие языки проверяет раздел 5
 export XDG_STATE_HOME="$T/xdg"
 NOTES="$T/notes.log"
 cat >"$T/notify.sh" <<EOF
@@ -133,6 +134,12 @@ echo "$tbl" | sed 's/^/     | /'
 check "строки не шире терминала" "0" "$(echo "$tbl" | jq -R --argjson w "$COLUMNS" 'select(length > $w)' | wc -l)"
 check "при узкой панели тоже" "0" "$(COLUMNS=96 "$DISP" ls | jq -R 'select(length > 96)' | wc -l)"
 has "сводка" "ждут тебя: 1 · работают: 0 · молчат: 0 · готово: 3" "$tbl"
+has "таблица по-английски" "waiting: 1 · working: 0" "$(DISP_LANG=en "$DISP" ls)"
+has "таблица по-украински" "ЗАВДАННЯ" "$(DISP_LANG=uk "$DISP" ls)"
+printf 'DISP_LANG=uk\n' >"$T/env-uk"
+has "язык из файла настроек" "мова: uk" "$(DISP_LANG= DISP_CONFIG="$T/env-uk" "$DISP" doctor)"
+has "язык системы" "ЗАВДАННЯ" "$(DISP_LANG= LANGUAGE= LC_ALL= LC_MESSAGES= LANG=uk_UA.UTF-8 "$DISP" ls)"
+has "чужой язык системы — английский" "TASK" "$(DISP_LANG= LANGUAGE= LC_ALL= LC_MESSAGES= LANG=de_DE.UTF-8 "$DISP" ls)"
 check "первой идёт ждущая сессия" "0c0de1" "$(echo "$tbl" | sed -n 3p | awk '{print $1}')"
 has "короткие ID различают сессии с общим префиксом UUIDv7" "0c0de2" "$tbl"
 has "подзадачи и фон в таблице" "1/3 ф1" "$tbl"

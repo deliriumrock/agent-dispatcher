@@ -13,6 +13,7 @@ use disp::config;
 use disp::notify;
 use disp::observe;
 use disp::store::{self, Signature, Store};
+use disp::tr;
 use tray_icon::menu::MenuEvent;
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
@@ -84,7 +85,7 @@ impl App {
             .with_tooltip(&tray.summary)
             .with_menu(Box::new(menu::build(&tray)?))
             .build()
-            .map_err(|err| format!("значок не создан: {err}"))?;
+            .map_err(|err| tr!("icon not created: {err}", "значок не создан: {err}", "значок не створено: {err}"))?;
         self.icon = Some(icon);
         self.tray = tray;
         Ok(())
@@ -105,14 +106,22 @@ impl App {
                 match picture(&next) {
                     Ok(picture) => {
                         if let Err(err) = icon.set_icon(Some(picture)) {
-                            warn(&format!("значок не обновлён: {err}"));
+                            warn(&tr!(
+                                "icon not updated: {err}",
+                                "значок не обновлён: {err}",
+                                "значок не оновлено: {err}"
+                            ));
                         }
                     }
                     Err(err) => warn(&err),
                 }
             }
             if let Err(err) = icon.set_tooltip(Some(&next.summary)) {
-                warn(&format!("подсказка не обновлена: {err}"));
+                warn(&tr!(
+                    "tooltip not updated: {err}",
+                    "подсказка не обновлена: {err}",
+                    "підказку не оновлено: {err}"
+                ));
             }
             match menu::build(&next) {
                 Ok(menu) => icon.set_menu(Some(Box::new(menu))),
@@ -136,7 +145,7 @@ impl App {
             (Action::Open, _) => (actions::open_panel(), String::new()),
             (_, Some(key)) => match self.tray.entry(key) {
                 Some(entry) => (actions::on_session(&action, &entry.path), entry.text.clone()),
-                None => (Err("этой сессии уже нет в списке".to_string()), String::new()),
+                None => (Err(actions::gone()), String::new()),
             },
             (_, None) => return Flow::Go,
         };
@@ -167,7 +176,13 @@ impl App {
 /// Картинка значка для модели.
 fn picture(tray: &Tray) -> Result<Icon, String> {
     Icon::from_rgba(icon::render(tray.level, tray.count), icon::SIZE, icon::SIZE)
-        .map_err(|err| format!("картинка значка не годится: {err}"))
+        .map_err(|err| {
+            tr!(
+                "the icon picture does not fit: {err}",
+                "картинка значка не годится: {err}",
+                "зображення значка не годиться: {err}"
+            )
+        })
 }
 
 /// Сообщение в журнал ошибок программы.

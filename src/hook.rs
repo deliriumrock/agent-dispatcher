@@ -22,6 +22,7 @@ use crate::panes;
 use crate::procs;
 use crate::store::{self, JournalEvent, Store};
 use crate::text::{clip, dur, oneline, value_text};
+use crate::{t, tr};
 
 /// Типы уведомлений агента, которые означают «жду человека».
 const WAITING_NOTICES: [&str; 5] = [
@@ -209,9 +210,10 @@ pub fn step(
         }
         Action::Ask => {
             let tool = pick(payload, &["tool_name"]).map_or_else(|| "?".to_string(), value_text);
-            let detail = format!("разрешение: {}", clip(&oneline(&tool), 40));
+            let tool = clip(&oneline(&tool), 40);
+            let detail = tr!("permission: {tool}", "разрешение: {tool}", "дозвіл: {tool}");
             if before != Status::Waiting {
-                note_text = Some(format!("✋ {label} · {who} ждёт тебя · {detail} · {place}"));
+                note_text = Some(waiting_note(&label, who, &detail, place));
             }
             s.status = Status::Waiting;
             s.detail = detail;
@@ -226,7 +228,7 @@ pub fn step(
                 .any(|known| kind.eq_ignore_ascii_case(known));
             if asks_human || (kind.is_empty() && before == Status::Working) {
                 if before != Status::Waiting {
-                    note_text = Some(format!("✋ {label} · {who} ждёт тебя · {detail} · {place}"));
+                    note_text = Some(waiting_note(&label, who, &detail, place));
                     s.detail = detail;
                 }
                 s.status = Status::Waiting;
@@ -292,19 +294,25 @@ pub fn step(
             s.accepted = false;
             if lasted >= ctx.notify_min_sec {
                 let in_background = if background > 0 {
-                    format!(" · в фоне: {background}")
+                    tr!(
+                        " · in background: {background}",
+                        " · в фоне: {background}",
+                        " · у фоні: {background}"
+                    )
                 } else {
                     String::new()
                 };
-                note_text = Some(format!(
-                    "✅ {label} · {who} закончил ход ({}){in_background} · {place}",
-                    dur(lasted)
+                let took = dur(lasted);
+                note_text = Some(tr!(
+                    "✅ {label} · {who} finished the turn ({took}){in_background} · {place}",
+                    "✅ {label} · {who} закончил ход ({took}){in_background} · {place}",
+                    "✅ {label} · {who} завершив хід ({took}){in_background} · {place}"
                 ));
             }
         }
         Action::Fail => {
             let reason = pick(payload, &["error", "message", "reason"])
-                .map_or_else(|| "сбой".to_string(), value_text);
+                .map_or_else(|| tr!("failure", "сбой", "збій"), value_text);
             let detail = clip(&oneline(&reason), 80);
             note_text = Some(format!("⛔ {label} · {who}: {detail} · {place}"));
             s.status = Status::Error;
@@ -318,7 +326,7 @@ pub fn step(
             if matches!(before, Status::Working | Status::Waiting) {
                 s.status = Status::Done;
                 s.done_at = Some(ctx.now);
-                s.detail = "ход прерван".to_string();
+                s.detail = tr!("turn interrupted", "ход прерван", "хід перервано");
                 s.subagents = 0;
                 s.accepted = false;
             }
@@ -369,6 +377,15 @@ pub fn step(
     }
 }
 
+/// Уведомление «агент ждёт тебя».
+fn waiting_note(label: &str, who: &str, detail: &str, place: &str) -> String {
+    tr!(
+        "✋ {label} · {who} is waiting for you · {detail} · {place}",
+        "✋ {label} · {who} ждёт тебя · {detail} · {place}",
+        "✋ {label} · {who} чекає на тебе · {detail} · {place}"
+    )
+}
+
 /// Первое из полей события, которое задано (не `null` и не `false`).
 fn pick<'a>(payload: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a Value> {
     keys.iter()
@@ -402,7 +419,14 @@ pub fn run(agent: &str, event_arg: &str) {
     match handled {
         Ok(Ok(())) => log(&store, None),
         Ok(Err(err)) => log(&store, Some(&err.to_string())),
-        Err(_) => log(&store, Some("внутренняя ошибка при обработке события")),
+        Err(_) => log(
+            &store,
+            Some(t!(
+                "internal error while handling the event",
+                "внутренняя ошибка при обработке события",
+                "внутрішня помилка під час обробки події"
+            )),
+        ),
     }
     if agent == "gemini" {
         let _ = io::stdout().write_all(b"{}\n");
@@ -587,7 +611,7 @@ fn label_pane(action: Action, old: Option<&Session>, state: &Session) {
 
 /// Дописывает сырое событие в `payloads.tsv` (режим `DISP_DEBUG=1`).
 fn dump_payload(store: &Store, agent: &str, payload: Option<&Value>) {
-    let body = payload.map_or_else(|| "\"<не JSON>\"".to_string(), Value::to_string);
+    let body = payload.map_or_else(|| "\"<not JSON>\"".to_string(), Value::to_string);
     let line = format!("{}\t{agent}\t{body}\n", Local::now().format("%F %T"));
     append(&store.paths.payloads(), &line);
 }

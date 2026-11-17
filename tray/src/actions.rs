@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use disp::board::{self, Accepted, Board, Row};
-use disp::{cli, panes};
+use disp::{cli, panes, tr};
 
 use crate::model::Action;
 
@@ -15,7 +15,7 @@ use crate::model::Action;
 pub fn on_session(action: &Action, path: &Path) -> Result<String, String> {
     let board = Board::load();
     let Some((lock, mut row)) = board.fresh(path) else {
-        return Err("этой сессии уже нет в списке".to_string());
+        return Err(gone());
     };
     match action {
         // Enter уходит в панель агента: решение принимается по только что перечитанной
@@ -34,11 +34,18 @@ pub fn on_session(action: &Action, path: &Path) -> Result<String, String> {
 /// что с ней.
 fn remove(board: &Board, row: &mut Row) -> Result<String, String> {
     match board::accept(row, board.now, false) {
-        Ok(Accepted::Yes) => Ok(format!("убрано: {}", row.summary())),
-        Ok(Accepted::StillActive) => {
-            Err("сессия снова работает — убрать её можно в панели (disp watch)".to_string())
+        Ok(Accepted::Yes) => {
+            let summary = row.summary();
+            Ok(tr!("removed: {summary}", "убрано: {summary}", "прибрано: {summary}"))
         }
-        Err(err) => Err(format!("не записано: {err}")),
+        Ok(Accepted::StillActive) => {
+            Err(tr!(
+            "the session is working again — it can be removed in the panel (disp watch)",
+            "сессия снова работает — убрать её можно в панели (disp watch)",
+            "сесія знову працює — прибрати її можна в панелі (disp watch)"
+        ))
+        }
+        Err(err) => Err(tr!("not saved: {err}", "не записано: {err}", "не записано: {err}")),
     }
 }
 
@@ -46,7 +53,11 @@ fn remove(board: &Board, row: &mut Row) -> Result<String, String> {
 pub fn open_panel() -> Result<String, String> {
     let board = Board::load();
     let Some(program) = cli::gui_program(&board) else {
-        return Err("не найдена программа disp-gui (собрать и поставить: make install-gui)".into());
+        return Err(tr!(
+            "disp-gui not found (build and install: make install-gui)",
+            "не найдена программа disp-gui (собрать и поставить: make install-gui)",
+            "не знайдено програму disp-gui (зібрати й поставити: make install-gui)"
+        ));
     };
     let mut child = Command::new(&program)
         .stdin(Stdio::null())
@@ -54,8 +65,24 @@ pub fn open_panel() -> Result<String, String> {
         .stderr(Stdio::null())
         .process_group(0)
         .spawn()
-        .map_err(|err| format!("не удалось запустить {}: {err}", program.display()))?;
+        .map_err(|err| {
+            let program = program.display();
+            tr!(
+                "could not start {program}: {err}",
+                "не удалось запустить {program}: {err}",
+                "не вдалося запустити {program}: {err}"
+            )
+        })?;
     // Значок живёт долго: закрытое окно надо забрать, иначе останется процесс-зомби.
     std::thread::spawn(move || child.wait());
-    Ok("открыта панель".to_string())
+    Ok(tr!("panel opened", "открыта панель", "панель відкрито"))
+}
+
+/// «Этой сессии уже нет в списке» на языке интерфейса.
+pub fn gone() -> String {
+    tr!(
+        "this session is no longer in the list",
+        "этой сессии уже нет в списке",
+        "цієї сесії вже немає в списку"
+    )
 }

@@ -8,6 +8,7 @@ use crate::model::View;
 use crate::store::JournalEvent;
 use crate::text::latin_key;
 use crate::timeline::{History, Segment, Window};
+use crate::{t, tr};
 
 /// Сколько секунд сообщение о результате действия остаётся в нижней строке.
 const NOTICE_SEC: i64 = 5;
@@ -211,7 +212,7 @@ impl App {
                 if matches!(key.code, KeyCode::Char('y' | 'Y' | 'н' | 'Н' | 'д' | 'Д')) {
                     return Some(Command::Accept { force: true });
                 }
-                self.notify("не убрано", false);
+                self.notify(t!("not removed", "не убрано", "не прибрано"), false);
                 None
             }
             Mode::Journal { scroll } => {
@@ -287,7 +288,14 @@ impl App {
     fn approve_key(&mut self) -> Option<Command> {
         let row = self.selected_row()?;
         if row.view != View::Wait {
-            self.notify("агент сейчас ничего не спрашивает", true);
+            self.notify(
+                t!(
+                    "the agent is not asking anything now",
+                    "агент сейчас ничего не спрашивает",
+                    "агент зараз нічого не питає"
+                ),
+                true,
+            );
             return None;
         }
         Some(Command::Approve)
@@ -361,7 +369,8 @@ impl App {
     fn resort(&mut self) {
         let rows = std::mem::take(&mut self.rows);
         self.set_rows(rows, self.now);
-        self.notify(format!("сортировка: {}", self.sort.label()), false);
+        let sort = self.sort.label();
+        self.notify(tr!("sort: {sort}", "сортировка: {sort}", "сортування: {sort}"), false);
     }
 
     /// Меняет длину окна ленты на `steps` ступеней: меньше нуля — ближе, больше — дальше.

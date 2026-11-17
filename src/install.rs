@@ -10,6 +10,7 @@ use crate::config::env_nonempty;
 use crate::error::{Error, Result};
 use crate::store::write_atomic;
 use crate::text::{emit, warn};
+use crate::{t, tr};
 
 /// События Claude Code, на которые подписывается диспетчер.
 const CLAUDE_EVENTS: [&str; 12] = [
@@ -101,7 +102,11 @@ pub fn config(args: &[String]) -> u8 {
             0
         }
         None => {
-            warn("использование: disp config claude|codex|gemini");
+            warn(t!(
+                "usage: disp config claude|codex|gemini",
+                "использование: disp config claude|codex|gemini",
+                "використання: disp config claude|codex|gemini"
+            ));
             2
         }
     }
@@ -113,13 +118,17 @@ pub fn config(args: &[String]) -> u8 {
 pub fn install(args: &[String]) -> u8 {
     let agent = args.first().map(String::as_str).unwrap_or_default();
     let (Some(target), Some(block)) = (target(agent), config_block(agent)) else {
-        warn("использование: disp install claude|codex|gemini");
+        warn(t!(
+            "usage: disp install claude|codex|gemini",
+            "использование: disp install claude|codex|gemini",
+            "використання: disp install claude|codex|gemini"
+        ));
         return 2;
     };
     match apply(&target.file, &block) {
-        Ok(message) => {
+        Ok((message, changed)) => {
             emit(&format!("{message}\n"));
-            if !message.contains("изменений нет") {
+            if changed {
                 emit(&format!("{}\n", target.hint));
             }
             0
@@ -141,50 +150,77 @@ fn target(agent: &str) -> Option<Target> {
     Some(match agent {
         "claude" => Target {
             file: path("DISP_CLAUDE_SETTINGS", ".claude/settings.json"),
-            hint: "Открытые сессии Claude Code подхватят хуки после /hooks или перезапуска.",
+            hint: t!(
+                "Open Claude Code sessions pick up the hooks after /hooks or a restart.",
+                "Открытые сессии Claude Code подхватят хуки после /hooks или перезапуска.",
+                "Відкриті сесії Claude Code підхоплять хуки після /hooks або перезапуску."
+            ),
         },
         "codex" => Target {
             file: path("DISP_CODEX_HOOKS", ".codex/hooks.json"),
-            hint: "Открой /hooks в Codex и подтверди доверие: без этого он хуки пропускает.",
+            hint: t!(
+                "Open /hooks in Codex and confirm trust: without it Codex skips the hooks.",
+                "Открой /hooks в Codex и подтверди доверие: без этого он хуки пропускает.",
+                "Відкрий /hooks у Codex і підтверди довіру: без цього він пропускає хуки."
+            ),
         },
         "gemini" => Target {
             file: path("DISP_GEMINI_SETTINGS", ".gemini/settings.json"),
-            hint: "Новые сессии Gemini CLI подхватят хуки при запуске.",
+            hint: t!(
+                "New Gemini CLI sessions pick up the hooks at start.",
+                "Новые сессии Gemini CLI подхватят хуки при запуске.",
+                "Нові сесії Gemini CLI підхоплять хуки під час запуску."
+            ),
         },
         _ => return None,
     })
 }
 
-/// Вносит блок хуков в файл настроек и возвращает сообщение о том, что сделано.
-fn apply(file: &Path, block: &Value) -> Result<String> {
+/// Вносит блок хуков в файл настроек. Возвращает сообщение о том, что сделано, и
+/// изменился ли файл.
+fn apply(file: &Path, block: &Value) -> Result<(String, bool)> {
     let shown = file.display();
+    let not_written = |err: &dyn std::fmt::Display| {
+        Error::Msg(tr!(
+            "could not write {shown}: {err}",
+            "не удалось записать {shown}: {err}",
+            "не вдалося записати {shown}: {err}"
+        ))
+    };
     let existing = fs::read(file).unwrap_or_default();
     if existing.is_empty() {
         if let Some(parent) = file.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|err| Error::Msg(format!("не удалось записать {shown}: {err}")))?;
+            fs::create_dir_all(parent).map_err(|err| not_written(&err))?;
         }
-        fs::write(file, format!("{}\n", pretty(block)))
-            .map_err(|err| Error::Msg(format!("не удалось записать {shown}: {err}")))?;
-        return Ok(format!("создан {shown}"));
+        fs::write(file, format!("{}\n", pretty(block))).map_err(|err| not_written(&err))?;
+        return Ok((tr!("created {shown}", "создан {shown}", "створено {shown}"), true));
     }
 
     let unreadable = || {
-        Error::Msg(format!(
-            "{shown} не читается как JSON-объект, ничего не изменено"
+        Error::Msg(tr!(
+            "{shown} does not read as a JSON object, nothing changed",
+            "{shown} не читается как JSON-объект, ничего не изменено",
+            "{shown} не читається як JSON-об'єкт, нічого не змінено"
         ))
     };
     let mut doc: Value = serde_json::from_slice(&existing).map_err(|_| unreadable())?;
     if !merge(&mut doc, block).ok_or_else(unreadable)? {
-        return Ok(format!("хуки disp уже подключены в {shown}, изменений нет"));
+        let message = tr!(
+            "disp hooks are already in {shown}, nothing to change",
+            "хуки disp уже подключены в {shown}, изменений нет",
+            "хуки disp уже підключено в {shown}, змін немає"
+        );
+        return Ok((message, false));
     }
 
     let backup = PathBuf::from(format!("{shown}.bak-disp"));
     let meta = fs::metadata(file)?;
     fs::copy(file, &backup).map_err(|err| {
-        Error::Msg(format!(
-            "не удалось сделать копию {}: {err}",
-            backup.display()
+        let backup = backup.display();
+        Error::Msg(tr!(
+            "could not make a copy {backup}: {err}",
+            "не удалось сделать копию {backup}: {err}",
+            "не вдалося зробити копію {backup}: {err}"
         ))
     })?;
     if let (Ok(modified), Ok(copy)) = (
@@ -195,11 +231,14 @@ fn apply(file: &Path, block: &Value) -> Result<String> {
     }
     let mode = std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777;
     write_atomic(file, format!("{}\n", pretty(&doc)).as_bytes(), mode)
-        .map_err(|err| Error::Msg(format!("не удалось записать {shown}: {err}")))?;
-    Ok(format!(
-        "хуки disp добавлены в {shown} (копия: {})",
-        backup.display()
-    ))
+        .map_err(|err| not_written(&err))?;
+    let backup = backup.display();
+    let message = tr!(
+        "disp hooks added to {shown} (copy: {backup})",
+        "хуки disp добавлены в {shown} (копия: {backup})",
+        "хуки disp додано в {shown} (копія: {backup})"
+    );
+    Ok((message, true))
 }
 
 /// Добавляет в документ записи блока, которых там ещё нет. Возвращает, изменился ли

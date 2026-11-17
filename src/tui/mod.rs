@@ -32,6 +32,7 @@ use crate::observe;
 use crate::store::{self, Signature, Store};
 use crate::text::warn;
 use crate::timeline::History;
+use crate::{t, tr};
 
 /// Как часто панель проверяет клавиши и файлы сессий.
 const POLL: Duration = Duration::from_millis(200);
@@ -118,7 +119,11 @@ fn watch_terminal(stop: Arc<AtomicBool>) {
             }
         });
     if let Err(err) = spawned {
-        warn(&format!("disp watch: сторож терминала не запущен: {err}"));
+        warn(&tr!(
+            "disp watch: terminal watchdog not started: {err}",
+            "disp watch: сторож терминала не запущен: {err}",
+            "disp watch: сторож термінала не запущено: {err}"
+        ));
     }
 }
 
@@ -249,10 +254,13 @@ fn execute(command: Command, app: &mut App, paths: &Paths) {
                 return;
             };
             match board::accept(&mut row, board.now, force) {
-                Ok(Accepted::Yes) => app.notify(format!("убрано: {}", row.summary()), false),
+                Ok(Accepted::Yes) => {
+                    let summary = row.summary();
+                    app.notify(tr!("removed: {summary}", "убрано: {summary}", "прибрано: {summary}"), false);
+                }
                 // Пока мы смотрели на экран, сессия снова заработала: спрашиваем.
                 Ok(Accepted::StillActive) => app.mode = Mode::Confirm,
-                Err(err) => app.notify(format!("не записано: {err}"), true),
+                Err(err) => app.notify(not_saved(&err), true),
             }
         }
         Command::Unaccept => {
@@ -260,8 +268,18 @@ fn execute(command: Command, app: &mut App, paths: &Paths) {
                 return;
             };
             match board::unaccept(&mut row) {
-                Ok(()) => app.notify(format!("возвращено в список: {}", row.summary()), false),
-                Err(err) => app.notify(format!("не записано: {err}"), true),
+                Ok(()) => {
+                    let summary = row.summary();
+                    app.notify(
+                        tr!(
+                            "back in the list: {summary}",
+                            "возвращено в список: {summary}",
+                            "повернуто до списку: {summary}"
+                        ),
+                        false,
+                    );
+                }
+                Err(err) => app.notify(not_saved(&err), true),
             }
         }
         Command::Rename(title) => {
@@ -273,9 +291,9 @@ fn execute(command: Command, app: &mut App, paths: &Paths) {
                     if panes::enabled(&board.settings) && !row.session.ended {
                         panes::apply(&row.session, true);
                     }
-                    app.notify(format!("названо: {title}"), false);
+                    app.notify(tr!("named: {title}", "названо: {title}", "названо: {title}"), false);
                 }
-                Err(err) => app.notify(format!("не записано: {err}"), true),
+                Err(err) => app.notify(not_saved(&err), true),
             }
         }
     }
@@ -289,8 +307,20 @@ fn fresh(app: &mut App) -> Option<(Board, Option<File>, Row)> {
     match board.fresh(&path) {
         Some((lock, row)) => Some((board, lock, row)),
         None => {
-            app.notify("этой сессии уже нет в списке", true);
+            app.notify(
+                t!(
+                    "this session is no longer in the list",
+                    "этой сессии уже нет в списке",
+                    "цієї сесії вже немає в списку"
+                ),
+                true,
+            );
             None
         }
     }
+}
+
+/// «Не записано: …» на языке интерфейса.
+fn not_saved(err: &dyn std::fmt::Display) -> String {
+    tr!("not saved: {err}", "не записано: {err}", "не записано: {err}")
 }
