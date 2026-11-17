@@ -15,6 +15,7 @@ use slint::platform::Key;
 use slint::{ComponentHandle, PhysicalSize, SharedString, Timer, TimerMode};
 
 use crate::state::{Outcome, State};
+use disp::{t, tr};
 
 slint::include_modules!();
 
@@ -24,11 +25,20 @@ const POLL: Duration = Duration::from_millis(250);
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "-h" || arg == "--help") {
+        let version = disp::VERSION;
         println!(
-            "disp-gui {} — графическая оболочка диспетчера сессий\n\n  \
-             disp-gui               открыть окно\n  \
-             disp-gui --size ШxВ    окно заданного размера в пикселях\n",
-            disp::VERSION
+            "{}",
+            tr!(
+                "disp-gui {version} — graphical shell of the session dispatcher\n\n  \
+                 disp-gui               open the window\n  \
+                 disp-gui --size WxH    a window of the given size in pixels\n",
+                "disp-gui {version} — графическая оболочка диспетчера сессий\n\n  \
+                 disp-gui               открыть окно\n  \
+                 disp-gui --size ШxВ    окно заданного размера в пикселях\n",
+                "disp-gui {version} — графічна оболонка диспетчера сесій\n\n  \
+                 disp-gui               відкрити вікно\n  \
+                 disp-gui --size ШxВ    вікно заданого розміру в пікселях\n"
+            )
         );
         return ExitCode::SUCCESS;
     }
@@ -54,6 +64,38 @@ fn window_size(args: &[String]) -> Option<PhysicalSize> {
     ))
 }
 
+/// Ставит надписи окна на языке интерфейса.
+fn set_texts(texts: &Texts) {
+    texts.set_waiting(t!("waiting", "ждут тебя", "чекають на тебе").into());
+    texts.set_working(t!("working", "работают", "працюють").into());
+    texts.set_quiet(t!("quiet", "молчат", "мовчать").into());
+    texts.set_done(t!("done", "готово", "готово").into());
+    texts.set_all(t!("all", "все", "усі").into());
+    texts.set_sort(t!("sort", "сорт", "сорт.").into());
+    texts.set_no_sessions(t!("No sessions.", "Сессий нет.", "Сесій немає.").into());
+    texts.set_no_open_sessions(
+        t!(
+            "No open sessions.  Tab shows removed ones too.",
+            "Незакрытых сессий нет.  Tab покажет и убранные.",
+            "Незакритих сесій немає.  Tab покаже й прибрані."
+        )
+        .into(),
+    );
+    texts.set_approve(t!("Approve", "Принять", "Прийняти").into());
+    texts.set_remove(t!("Remove", "Убрать", "Прибрати").into());
+    texts.set_focus(t!("Go to", "Перейти", "Перейти").into());
+    texts.set_rename(t!("Name", "Назвать", "Назвати").into());
+    texts.set_name_prompt(t!("name:", "название:", "назва:").into());
+    texts.set_name_placeholder(
+        t!(
+            "Enter — save, empty line — cancel",
+            "Enter — сохранить, пустая строка — отмена",
+            "Enter — зберегти, порожній рядок — скасувати"
+        )
+        .into(),
+    );
+}
+
 /// Создаёт окно, связывает его с состоянием и крутит цикл событий.
 fn run(size: Option<PhysicalSize>) -> Result<(), slint::PlatformError> {
     let app = AppWindow::new()?;
@@ -61,6 +103,7 @@ fn run(size: Option<PhysicalSize>) -> Result<(), slint::PlatformError> {
         app.window().set_size(size);
     }
     app.set_version(disp::VERSION.into());
+    set_texts(&app.global::<Texts>());
 
     let state = Rc::new(RefCell::new(State::new()));
     state.borrow_mut().reload();
@@ -246,4 +289,98 @@ fn publish(app: &AppWindow, state: &State) {
     app.set_notice_error(view.notice_error);
     app.set_question(view.question);
     app.set_renaming(view.renaming);
+    let fit = header_fit(
+        logical_width(app),
+        &Header {
+            title: app.get_title_width(),
+            badges: app.get_badges_width(),
+            compact: app.get_compact_width(),
+            right: [
+                app.get_sort_width(),
+                app.get_clock_width(),
+                app.get_version_width(),
+            ],
+        },
+    );
+    app.set_compact_badges(fit.compact);
+    app.set_show_sort(fit.shown >= 1);
+    app.set_show_clock(fit.shown >= 2);
+    app.set_show_version(fit.shown >= 3);
+}
+
+/// Ширины частей верхней полосы окна, логические пиксели.
+struct Header {
+    /// Надпись «disp» слева.
+    title: f32,
+    /// Четыре счётчика с подписями.
+    badges: f32,
+    /// Те же счётчики со значками вместо подписей.
+    compact: f32,
+    /// Справа по порядку: сортировка, время, версия.
+    right: [f32; 3],
+}
+
+/// Что помещается в верхнюю полосу.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Fit {
+    /// Счётчики со значками вместо подписей.
+    compact: bool,
+    /// Сколько надписей справа показать: сортировка, время, версия — в этом порядке.
+    shown: usize,
+}
+
+/// Поля и промежутки полосы: как в разметке (`padding` 12 + 12, `spacing` 8).
+const HEADER_PADDING: f32 = 24.0;
+const HEADER_SPACING: f32 = 8.0;
+
+/// Решает, что поместится в полосу окна шириной `width`. Счётчики важнее всего:
+/// сначала справа налево уходят версия, время и сортировка, а если тесно и без них,
+/// подписи счётчиков сжимаются до значков.
+fn header_fit(width: f32, header: &Header) -> Fit {
+    // Части полосы: «disp», счётчики, растяжка и показанные надписи справа.
+    let need = |badges: f32, shown: usize| {
+        let right: f32 = header.right[..shown].iter().sum();
+        HEADER_PADDING + header.title + badges + right + HEADER_SPACING * (2 + shown) as f32
+    };
+    for compact in [false, true] {
+        let badges = if compact { header.compact } else { header.badges };
+        if let Some(shown) = (0..=3).rev().find(|&shown| need(badges, shown) <= width) {
+            return Fit { compact, shown };
+        }
+    }
+    Fit {
+        compact: true,
+        shown: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Полоса, где «disp» — 35, счётчики — 300 (со значками — 150), справа — 90, 50, 80.
+    fn header() -> Header {
+        Header {
+            title: 35.0,
+            badges: 300.0,
+            compact: 150.0,
+            right: [90.0, 50.0, 80.0],
+        }
+    }
+
+    #[test]
+    fn counters_outlive_everything_else_in_the_header() {
+        let fit = |width| header_fit(width, &header());
+        // Всё: 24 + 35 + 300 + 220 + 8 × 5 = 619.
+        assert_eq!(fit(619.0), Fit { compact: false, shown: 3 });
+        // Уходят версия, время, сортировка.
+        assert_eq!(fit(618.0), Fit { compact: false, shown: 2 });
+        assert_eq!(fit(500.0), Fit { compact: false, shown: 1 });
+        assert_eq!(fit(400.0), Fit { compact: false, shown: 0 });
+        // Подписи не помещаются и без надписей справа (24 + 35 + 300 + 16 = 375): значки,
+        // и рядом снова есть место для сортировки (24 + 35 + 150 + 90 + 24 = 323).
+        assert_eq!(fit(374.0), Fit { compact: true, shown: 1 });
+        assert_eq!(fit(240.0), Fit { compact: true, shown: 0 });
+        assert_eq!(fit(100.0), Fit { compact: true, shown: 0 });
+    }
 }

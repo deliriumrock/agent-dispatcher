@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use crate::board::Row;
 use crate::model::{Status, View};
 use crate::store::JournalEvent;
+use crate::text;
 
 /// Чем занята сессия на отрезке ленты. Порядок вариантов — порядок важности:
 /// если в одно деление ленты попало несколько отрезков, показывается самый важный.
@@ -239,9 +240,9 @@ fn session_points(row: &Row) -> Vec<(i64, Option<Phase>)> {
 /// Длина окна ленты словами: `30м`, `3ч`, `24ч`.
 pub fn span_label(span: i64) -> String {
     if span < 3_600 {
-        format!("{}м", span / 60)
+        text::minutes(span / 60)
     } else {
-        format!("{}ч", span / 3_600)
+        text::hours(span / 3_600)
     }
 }
 

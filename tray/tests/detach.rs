@@ -33,6 +33,8 @@ impl Sandbox {
     fn detach(&self, bus: &str) -> Output {
         Command::new(env!("CARGO_BIN_EXE_disp-tray"))
             .arg("--detach")
+            // Ожидания тестов написаны по-русски.
+            .env("DISP_LANG", "ru")
             .env("DISP_STATE_DIR", self.state())
             .env("DISP_CONFIG", self.dir.join("env"))
             .env("DBUS_SESSION_BUS_ADDRESS", bus)

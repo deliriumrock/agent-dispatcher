@@ -15,6 +15,7 @@ use crate::detect::run_with_timeout;
 use crate::model::{Session, Status};
 use crate::notify;
 use crate::text::clip;
+use crate::tr;
 
 /// Наибольшая длина названия в подписи: длиннее рамка панели всё равно не покажет.
 const TITLE_MAX: usize = 60;
@@ -113,7 +114,11 @@ pub fn clear_all(zellij: &str) -> usize {
 /// `Err` — с текстом для человека, почему до панели не добраться.
 fn pane_action(session: &Session) -> Result<(Command, &str, &str), String> {
     if session.ended {
-        return Err("сессия закрыта: её панели уже нет".to_string());
+        return Err(tr!(
+            "the session is closed: its pane is gone",
+            "сессия закрыта: её панели уже нет",
+            "сесію закрито: її панелі вже немає"
+        ));
     }
     let Some((zellij, pane)) = target(&session.place) else {
         let place = if session.place.is_empty() {
@@ -121,7 +126,11 @@ fn pane_action(session: &Session) -> Result<(Command, &str, &str), String> {
         } else {
             &session.place
         };
-        return Err(format!("эта сессия не в zellij: {place}"));
+        return Err(tr!(
+            "this session is not in zellij: {place}",
+            "эта сессия не в zellij: {place}",
+            "ця сесія не в zellij: {place}"
+        ));
     };
     let here = env_nonempty("ZELLIJ_SESSION_NAME");
     let mut command = Command::new("zellij");
@@ -130,7 +139,11 @@ fn pane_action(session: &Session) -> Result<(Command, &str, &str), String> {
         let sessions = run_with_timeout(Command::new("zellij").args(["list-sessions", "-n", "-s"]));
         let exists = sessions.is_some_and(|list| list.lines().any(|name| name.trim() == zellij));
         if !exists {
-            return Err(format!("сессии zellij «{zellij}» сейчас нет"));
+            return Err(tr!(
+                "zellij session «{zellij}» is not running now",
+                "сессии zellij «{zellij}» сейчас нет",
+                "сесії zellij «{zellij}» зараз немає"
+            ));
         }
         command.args(["--session", zellij]);
     }
@@ -145,9 +158,20 @@ pub fn focus(session: &Session) -> Result<String, String> {
     command.args(["focus-pane-id", &format!("terminal_{pane}")]);
     let same_session = env_nonempty("ZELLIJ_SESSION_NAME").as_deref() == Some(zellij);
     match run_with_timeout(&mut command) {
-        Some(_) if same_session => Ok(format!("фокус: {}", session.place)),
-        Some(_) => Ok(format!("выбрана в другой сессии zellij: {zellij}")),
-        None => Err(format!("в сессии «{zellij}» нет панели {pane}")),
+        Some(_) if same_session => {
+            let place = &session.place;
+            Ok(tr!("focus: {place}", "фокус: {place}", "фокус: {place}"))
+        }
+        Some(_) => Ok(tr!(
+            "selected in another zellij session: {zellij}",
+            "выбрана в другой сессии zellij: {zellij}",
+            "вибрано в іншій сесії zellij: {zellij}"
+        )),
+        None => Err(tr!(
+            "zellij session «{zellij}» has no pane {pane}",
+            "в сессии «{zellij}» нет панели {pane}",
+            "у сесії «{zellij}» немає панелі {pane}"
+        )),
     }
 }
 
@@ -159,13 +183,28 @@ pub fn focus(session: &Session) -> Result<String, String> {
 /// перечитанную запись сессии.
 pub fn approve(session: &Session) -> Result<String, String> {
     if session.status != Status::Waiting || session.ended {
-        return Err("агент сейчас ничего не спрашивает".to_string());
+        return Err(tr!(
+            "the agent is not asking anything now",
+            "агент сейчас ничего не спрашивает",
+            "агент зараз нічого не питає"
+        ));
     }
     let (mut command, _zellij, pane) = pane_action(session)?;
     command.args(["write", "-p", &format!("terminal_{pane}"), "13"]);
     match run_with_timeout(&mut command) {
-        Some(_) => Ok(format!("ответ по умолчанию отправлен: {}", session.place)),
-        None => Err(format!("не удалось нажать Enter в панели {pane}")),
+        Some(_) => {
+            let place = &session.place;
+            Ok(tr!(
+                "default answer sent: {place}",
+                "ответ по умолчанию отправлен: {place}",
+                "відповідь за замовчуванням надіслано: {place}"
+            ))
+        }
+        None => Err(tr!(
+            "could not press Enter in pane {pane}",
+            "не удалось нажать Enter в панели {pane}",
+            "не вдалося натиснути Enter у панелі {pane}"
+        )),
     }
 }
 

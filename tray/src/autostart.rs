@@ -6,6 +6,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use disp::tr;
+
 /// Имя агента launchd и файла `.desktop`.
 const NAME: &str = "disp-tray";
 
@@ -14,7 +16,7 @@ fn location() -> io::Result<PathBuf> {
     let home = env::var_os("HOME")
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
-        .ok_or_else(|| io::Error::other("не задан HOME"))?;
+        .ok_or_else(|| io::Error::other(tr!("HOME is not set", "не задан HOME", "не задано HOME")))?;
     Ok(if cfg!(target_os = "macos") {
         home.join(format!("Library/LaunchAgents/local.{NAME}.plist"))
     } else {
@@ -47,14 +49,26 @@ pub fn enable() -> u8 {
     })();
     match result {
         Ok(path) => {
+            let path = path.display();
             println!(
-                "disp-tray: значок будет запускаться при входе в систему ({})",
-                path.display()
+                "{}",
+                tr!(
+                    "disp-tray: the icon will start at login ({path})",
+                    "disp-tray: значок будет запускаться при входе в систему ({path})",
+                    "disp-tray: значок запускатиметься під час входу в систему ({path})"
+                )
             );
             0
         }
         Err(err) => {
-            eprintln!("disp-tray: автозапуск не настроен: {err}");
+            eprintln!(
+                "{}",
+                tr!(
+                    "disp-tray: autostart not set up: {err}",
+                    "disp-tray: автозапуск не настроен: {err}",
+                    "disp-tray: автозапуск не налаштовано: {err}"
+                )
+            );
             1
         }
     }
@@ -71,15 +85,38 @@ pub fn disable() -> u8 {
     };
     match fs::remove_file(&path) {
         Ok(()) => {
-            println!("disp-tray: автозапуск снят ({})", path.display());
+            let path = path.display();
+            println!(
+                "{}",
+                tr!(
+                    "disp-tray: autostart removed ({path})",
+                    "disp-tray: автозапуск снят ({path})",
+                    "disp-tray: автозапуск знято ({path})"
+                )
+            );
             0
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            println!("disp-tray: автозапуск и не был настроен");
+            println!(
+                "{}",
+                tr!(
+                    "disp-tray: autostart was not set up anyway",
+                    "disp-tray: автозапуск и не был настроен",
+                    "disp-tray: автозапуск і не було налаштовано"
+                )
+            );
             0
         }
         Err(err) => {
-            eprintln!("disp-tray: не удалось удалить {}: {err}", path.display());
+            let path = path.display();
+            eprintln!(
+                "{}",
+                tr!(
+                    "disp-tray: could not delete {path}: {err}",
+                    "disp-tray: не удалось удалить {path}: {err}",
+                    "disp-tray: не вдалося видалити {path}: {err}"
+                )
+            );
             1
         }
     }
@@ -91,7 +128,9 @@ fn desktop_entry(exe: &Path) -> String {
         "[Desktop Entry]\n\
          Type=Application\n\
          Name=disp tray\n\
-         Comment=Значок диспетчера сессий AI-агентов\n\
+         Comment=Tray icon of the AI agent session dispatcher\n\
+         Comment[ru]=Значок диспетчера сессий AI-агентов\n\
+         Comment[uk]=Значок диспетчера сесій AI-агентів\n\
          Exec={}\n\
          NoDisplay=true\n\
          X-GNOME-Autostart-enabled=true\n",
@@ -107,10 +146,14 @@ fn desktop_entry(exe: &Path) -> String {
 /// и запускает несуществующую программу. Надёжного способа нет — путь отвергается.
 fn desktop_path_problem(exe: &Path) -> Option<String> {
     exe.to_string_lossy().contains('%').then(|| {
-        format!(
-            "в пути {} есть знак %, а с ним рабочий стол программу из автозапуска не \
+        let exe = exe.display();
+        tr!(
+            "the path {exe} has a % sign, and the desktop will not start the program from \
+             autostart with it; put it in another directory (make install-tray — into ~/.local/bin)",
+            "в пути {exe} есть знак %, а с ним рабочий стол программу из автозапуска не \
              запустит; поставь её в другой каталог (make install-tray — в ~/.local/bin)",
-            exe.display()
+            "у шляху {exe} є знак %, а з ним робочий стіл програму з автозапуску не \
+             запустить; постав її в інший каталог (make install-tray — у ~/.local/bin)"
         )
     })
 }

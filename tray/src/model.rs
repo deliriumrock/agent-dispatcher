@@ -7,6 +7,7 @@ use disp::board::{Counts, Row, or_question};
 use disp::model::{Status, View};
 use disp::panes;
 use disp::text::{clip, oneline};
+use disp::{t, tr};
 
 /// Сколько сессий одной группы показывается в меню; остальные — строкой «ещё N».
 const ENTRIES_MAX: usize = 10;
@@ -137,15 +138,18 @@ impl Tray {
             (Level::Calm, idle)
         };
         let summary = if rows.is_empty() {
-            "Незакрытых сессий нет".to_string()
+            tr!("No open sessions", "Незакрытых сессий нет", "Незакритих сесій немає")
         } else {
             counts.line_with_idle(idle)
         };
         let groups: [(&str, &[View]); 4] = [
-            ("Ждут тебя", &[View::Wait, View::Err, View::Lost, View::Stuck]),
-            ("Работают", &[View::Work, View::Quiet]),
-            ("Простой", &[View::Idle]),
-            ("Готово", &[View::Done]),
+            (
+                t!("Waiting for you", "Ждут тебя", "Чекають на тебе"),
+                &[View::Wait, View::Err, View::Lost, View::Stuck],
+            ),
+            (t!("Working", "Работают", "Працюють"), &[View::Work, View::Quiet]),
+            (t!("Idle", "Простой", "Простій"), &[View::Idle]),
+            (t!("Done", "Готово", "Готово"), &[View::Done]),
         ];
         let sections = groups
             .into_iter()
@@ -205,13 +209,16 @@ fn entry(row: &Row) -> Entry {
     let key = row.key();
     let mut actions = Vec::new();
     if s.status == Status::Waiting && !s.ended {
-        actions.push(("Ответить «да»".to_string(), Action::Approve(key.clone())));
+        let label = tr!("Answer “yes”", "Ответить «да»", "Відповісти «так»");
+        actions.push((label, Action::Approve(key.clone())));
     }
     if !s.ended && panes::target(&s.place).is_some() {
-        actions.push(("Перейти к панели".to_string(), Action::Focus(key.clone())));
+        let label = tr!("Go to the pane", "Перейти к панели", "Перейти до панелі");
+        actions.push((label, Action::Focus(key.clone())));
     }
     if !row.is_active() && !s.accepted {
-        actions.push(("Убрать из списка".to_string(), Action::Remove(key.clone())));
+        let label = tr!("Remove from the list", "Убрать из списка", "Прибрати зі списку");
+        actions.push((label, Action::Remove(key.clone())));
     }
     Entry {
         key,
@@ -231,6 +238,8 @@ mod tests {
     const NOW: i64 = 1_800_000_000;
 
     fn row(sid: &str, status: Status, place: &str, title: &str) -> Row {
+        // Ожидания тестов написаны по-русски.
+        disp::i18n::set(disp::i18n::Lang::Ru);
         let session = Session {
             agent: "claude".to_string(),
             session_id: sid.to_string(),
@@ -250,6 +259,7 @@ mod tests {
 
     #[test]
     fn empty_board_is_calm() {
+        disp::i18n::set(disp::i18n::Lang::Ru);
         let tray = Tray::from_rows(&[]);
         assert_eq!(tray.level, Level::Calm);
         assert_eq!(tray.count, 0);

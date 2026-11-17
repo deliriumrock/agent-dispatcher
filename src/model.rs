@@ -6,6 +6,8 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
+use crate::t;
+
 /// Статус сессии, как он хранится в файле.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase", from = "String")]
@@ -86,17 +88,17 @@ impl View {
         }
     }
 
-    /// Подпись в колонке «СТАТУС».
+    /// Подпись в колонке «СТАТУС»: знак и не больше девяти букв.
     pub fn label(self) -> &'static str {
         match self {
-            View::Wait => "! ЖДЁТ",
-            View::Err => "x СБОЙ",
-            View::Lost => "x ПРЕРВАНА",
-            View::Done => "✓ ГОТОВО",
-            View::Stuck => "? завис",
-            View::Quiet => "? молчит",
-            View::Work => "● работает",
-            View::Idle => "○ простой",
+            View::Wait => t!("! WAITING", "! ЖДЁТ", "! ЧЕКАЄ"),
+            View::Err => t!("x FAILED", "x СБОЙ", "x ЗБІЙ"),
+            View::Lost => t!("x LOST", "x ПРЕРВАНА", "x ОБІРВАНА"),
+            View::Done => t!("✓ DONE", "✓ ГОТОВО", "✓ ГОТОВО"),
+            View::Stuck => t!("? stuck", "? завис", "? завис"),
+            View::Quiet => t!("? quiet", "? молчит", "? мовчить"),
+            View::Work => t!("● working", "● работает", "● працює"),
+            View::Idle => t!("○ idle", "○ простой", "○ простій"),
         }
     }
 
@@ -313,6 +315,28 @@ mod tests {
         assert_eq!(session.detail, "");
         assert_eq!(session.subtasks.get("1").map(|task| task.d), Some(true));
         assert_eq!(session.extra.get("future_field"), Some(&Value::from(7)));
+    }
+
+    #[test]
+    fn status_labels_fit_their_column_in_every_language() {
+        use crate::i18n::{Lang, scoped};
+        let views = [
+            View::Wait,
+            View::Err,
+            View::Lost,
+            View::Stuck,
+            View::Work,
+            View::Quiet,
+            View::Idle,
+            View::Done,
+        ];
+        for lang in Lang::ALL {
+            let _lang = scoped(lang);
+            for view in views {
+                let label = view.label();
+                assert!(crate::text::width(label) <= 10, "{lang:?}: {label}");
+            }
+        }
     }
 
     #[test]

@@ -21,6 +21,7 @@ use std::process::{Command, ExitCode, Stdio};
 use disp::VERSION;
 use disp::board::Board;
 use disp::cli::TRAY_RUNNING_EXIT;
+use disp::tr;
 
 use startup::Outcome;
 
@@ -61,14 +62,24 @@ fn start(report: bool) -> u8 {
     let _lock = match store.tray_lock() {
         Ok(Some(lock)) => lock,
         Ok(None) => {
-            eprintln!("disp-tray: значок уже в трее");
+            eprintln!(
+                "{}",
+                tr!(
+                    "disp-tray: the icon is already in the tray",
+                    "disp-tray: значок уже в трее",
+                    "disp-tray: значок уже в треї"
+                )
+            );
             told(&Outcome::Running);
             return 0;
         }
         Err(err) => {
-            let text = format!(
-                "не удалось взять замок {}: {err}",
-                store.paths.tray_lock().display()
+            let lock = store.paths.tray_lock();
+            let lock = lock.display();
+            let text = tr!(
+                "could not take the lock {lock}: {err}",
+                "не удалось взять замок {lock}: {err}",
+                "не вдалося взяти замок {lock}: {err}"
             );
             eprintln!("disp-tray: {text}");
             told(&Outcome::Failed(text));
@@ -93,14 +104,28 @@ fn detach() -> u8 {
         Ok(Some(_free)) => {}
         Ok(None) => return TRAY_RUNNING_EXIT as u8,
         Err(err) => {
-            eprintln!("disp-tray: не проверить, запущен ли значок: {err}");
+            eprintln!(
+                "{}",
+                tr!(
+                    "disp-tray: cannot check whether the icon is running: {err}",
+                    "disp-tray: не проверить, запущен ли значок: {err}",
+                    "disp-tray: не перевірити, чи запущено значок: {err}"
+                )
+            );
             return 1;
         }
     }
     let exe = match env::current_exe() {
         Ok(exe) => exe,
         Err(err) => {
-            eprintln!("disp-tray: не найти свою программу: {err}");
+            eprintln!(
+                "{}",
+                tr!(
+                    "disp-tray: cannot find its own program: {err}",
+                    "disp-tray: не найти свою программу: {err}",
+                    "disp-tray: не знайти власну програму: {err}"
+                )
+            );
             return 1;
         }
     };
@@ -120,7 +145,15 @@ fn detach() -> u8 {
     let mut child = match started {
         Ok(child) => child,
         Err(err) => {
-            eprintln!("disp-tray: не удалось запустить {}: {err}", exe.display());
+            let exe = exe.display();
+            eprintln!(
+                "{}",
+                tr!(
+                    "disp-tray: could not start {exe}: {err}",
+                    "disp-tray: не удалось запустить {exe}: {err}",
+                    "disp-tray: не вдалося запустити {exe}: {err}"
+                )
+            );
             return 1;
         }
     };
@@ -136,7 +169,24 @@ fn detach() -> u8 {
 
 /// Справка.
 fn usage() -> String {
-    format!(
+    tr!(
+        "disp-tray {VERSION} — tray icon of the AI agent session dispatcher
+
+  disp-tray                  show the icon (usually via `disp tray`)
+  disp-tray --autostart      show the icon at login
+  disp-tray --no-autostart   stop showing it at login
+  disp-tray --detach         start the icon in the background and exit once it is shown
+                             (this is how disp starts it); errors of the running icon go
+                             to tray.log in the state directory
+
+The icon is a tile with the number of sessions, coloured by precedence: yellow — waiting
+for you; blue — working; green — nothing is working, finished ones are left; grey —
+idle. An empty grey frame — no open sessions.
+The menu follows the table order: waiting for you, working, idle, done.
+On Linux the icon is shown by a shell that supports StatusNotifierItem; GNOME needs
+the AppIndicator extension for it.
+Language: DISP_LANG=en|ru|uk, otherwise the system language.
+",
         "disp-tray {VERSION} — значок диспетчера сессий AI-агентов в трее
 
   disp-tray                  показать значок (обычно через `disp tray`)
@@ -152,6 +202,24 @@ fn usage() -> String {
 Меню в том же порядке, что таблица: ждут тебя, работают, простой, готово.
 На Linux значок показывает оболочка с поддержкой StatusNotifierItem; в GNOME для этого
 нужно расширение AppIndicator.
+Язык: DISP_LANG=en|ru|uk, иначе — язык системы.
+",
+        "disp-tray {VERSION} — значок диспетчера сесій AI-агентів у треї
+
+  disp-tray                  показати значок (зазвичай через `disp tray`)
+  disp-tray --autostart      показувати значок під час входу в систему
+  disp-tray --no-autostart   більше не показувати під час входу
+  disp-tray --detach         запустити значок у фоні й вийти, щойно він з'явився (так
+                             його запускає disp); помилки робочого значка — у
+                             tray.log у каталозі стану
+
+Значок — плашка з кількістю сесій, колір за старшинством: жовтий — чекають на тебе;
+синій — працюють; зелений — нічого не працює, лишилися готові; сірий —
+простоюють. Порожня сіра рамка — відкритих сесій немає.
+Меню в тому ж порядку, що й таблиця: чекають на тебе, працюють, простій, готово.
+У Linux значок показує оболонка з підтримкою StatusNotifierItem; у GNOME для цього
+потрібне розширення AppIndicator.
+Мова: DISP_LANG=en|ru|uk, інакше — мова системи.
 "
     )
 }
