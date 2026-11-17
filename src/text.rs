@@ -8,6 +8,7 @@ use serde_json::Value;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::config::env_nonempty;
+use crate::tr;
 
 /// Текст значения JSON: строка как есть, всё остальное — компактным JSON.
 pub fn value_text(value: &Value) -> String {
@@ -155,8 +156,8 @@ pub fn local_time(ts: i64, format: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Латинская буква той же клавиши в русской раскладке: панелью можно управлять,
-/// не переключая раскладку.
+/// Латинская буква той же клавиши в русской или украинской раскладке: панелью можно
+/// управлять, не переключая раскладку.
 pub fn latin_key(ch: char) -> char {
     match ch {
         'й' | 'Й' => 'q',
@@ -173,23 +174,25 @@ pub fn latin_key(ch: char) -> char {
         'г' | 'Г' => 'u',
         'р' | 'Р' => 'h',
         'е' | 'Е' => 't',
-        'ы' => 's',
-        'Ы' => 'S',
+        // Украинская раскладка: на месте `ы` стоит `і`.
+        'ы' | 'і' => 's',
+        'Ы' | 'І' => 'S',
         other => other,
     }
 }
 
-/// Возраст для колонки таблицы: `45с`, `12м`, `3ч`, `2д`.
+/// Возраст для колонки таблицы, не шире четырёх знаков: `45с`, `12м`, `3ч`, `2д`.
 pub fn age(seconds: i64) -> String {
     let d = seconds.max(0);
     if d < 60 {
-        format!("{d}с")
+        tr!("{d}s", "{d}с", "{d}с")
     } else if d < 3600 {
-        format!("{}м", d / 60)
+        minutes(d / 60)
     } else if d < 86400 {
-        format!("{}ч", d / 3600)
+        hours(d / 3600)
     } else {
-        format!("{}д", d / 86400)
+        let days = d / 86400;
+        tr!("{days}d", "{days}д", "{days}д")
     }
 }
 
@@ -197,12 +200,22 @@ pub fn age(seconds: i64) -> String {
 pub fn dur(seconds: i64) -> String {
     let d = seconds.max(0);
     if d < 60 {
-        format!("{d}с")
+        tr!("{d}s", "{d}с", "{d}с")
     } else if d < 3600 {
-        format!("{}м", d / 60)
+        minutes(d / 60)
     } else {
-        format!("{}ч {}м", d / 3600, (d % 3600) / 60)
+        format!("{} {}", hours(d / 3600), minutes((d % 3600) / 60))
     }
+}
+
+/// Минуты коротко: `12м`.
+pub fn minutes(count: i64) -> String {
+    tr!("{count}m", "{count}м", "{count}хв")
+}
+
+/// Часы коротко: `3ч`.
+pub fn hours(count: i64) -> String {
+    tr!("{count}h", "{count}ч", "{count}г")
 }
 
 /// Печатает текст в stdout. Ошибку записи (например, закрытый канал в `disp ls | head`)
@@ -223,6 +236,23 @@ pub fn warn(text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ages_fit_their_column_in_every_language() {
+        use crate::i18n::{Lang, scoped};
+        for lang in Lang::ALL {
+            let _lang = scoped(lang);
+            for seconds in [59, 3_599, 86_399, 999 * 86_400] {
+                let shown = age(seconds);
+                assert!(width(&shown) <= 4, "{lang:?}: {shown}");
+            }
+        }
+        let _uk = scoped(Lang::Uk);
+        assert_eq!((age(59), age(720), age(7200)), ("59с".into(), "12хв".into(), "2г".into()));
+        assert_eq!(dur(3900), "1г 5хв");
+        let _en = scoped(Lang::En);
+        assert_eq!((age(59), dur(3900)), ("59s".into(), "1h 5m".into()));
+    }
 
     #[test]
     fn oneline_collapses_breaks_and_trims() {

@@ -40,6 +40,8 @@ impl Sandbox {
         let path = std::env::var("PATH").unwrap_or_default();
         command
             .args(args)
+            // Ожидания тестов написаны по-русски.
+            .env("DISP_LANG", "ru")
             .env("PATH", format!("{}:{path}", self.dir.join("bin").display()))
             .env("DISP_STATE_DIR", self.dir.join("state"))
             .env("DISP_CONFIG", self.dir.join("env"))

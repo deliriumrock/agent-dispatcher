@@ -22,6 +22,7 @@ use crate::observe;
 use crate::panes;
 use crate::store::{self, Store};
 use crate::text::{age, clip, emit, local_time, pad, warn};
+use crate::{t, tr};
 
 /// Суммарная ширина всех колонок таблицы, кроме последней («ЧТО»).
 const FIXED_COLUMNS: usize = 81;
@@ -71,19 +72,24 @@ fn json_rows(board: &Board) -> String {
 fn table(board: &Board, cols: usize, all: bool, color: bool) -> String {
     let rows = board.visible(all);
     if rows.is_empty() {
-        return "Незакрытых сессий нет.  (disp ls -a покажет и убранные)".to_string();
+        return tr!(
+            "No open sessions.  (disp ls -a shows removed ones too)",
+            "Незакрытых сессий нет.  (disp ls -a покажет и убранные)",
+            "Незакритих сесій немає.  (disp ls -a покаже й прибрані)"
+        );
     }
 
     let mut lines = vec![Counts::of(&rows).line()];
     let header = format!(
-        "{} {} {} {} {} {} {} ЧТО",
+        "{} {} {} {} {} {} {} {}",
         pad("ID", 6),
-        pad("СТАТУС", 10),
-        pad("АГЕНТ", 6),
-        pad("ЗАДАЧА", 22),
-        pad("ПОДЗ", 7),
-        pad("ГДЕ", 18),
-        pad("ВОЗР", 4),
+        pad(t!("STATUS", "СТАТУС", "СТАТУС"), 10),
+        pad(t!("AGENT", "АГЕНТ", "АГЕНТ"), 6),
+        pad(t!("TASK", "ЗАДАЧА", "ЗАВДАННЯ"), 22),
+        pad(t!("SUB", "ПОДЗ", "ПІДЗ"), 7),
+        pad(t!("WHERE", "ГДЕ", "ДЕ"), 18),
+        pad(t!("AGE", "ВОЗР", "ВІК"), 4),
+        t!("WHAT", "ЧТО", "ЩО"),
     );
     lines.push(paint(&header, "1", color));
 
@@ -100,7 +106,11 @@ fn table(board: &Board, cols: usize, all: bool, color: bool) -> String {
             pad(&clip(row.place(), 18), 18),
             pad(&age(board.now - s.updated), 4),
             clip(&row.what(), what_width),
-            if s.accepted { "  [убрано]" } else { "" },
+            if s.accepted {
+                t!("  [removed]", "  [убрано]", "  [прибрано]")
+            } else {
+                ""
+            },
         );
         lines.push(paint(&line, row.view.color(), color));
     }
@@ -166,7 +176,11 @@ pub fn watch_plain(pause: Duration) -> u8 {
 /// `disp show <id|задача>`: подробности сессии.
 pub fn show(args: &[String]) -> u8 {
     let Some(query) = args.first() else {
-        warn("использование: disp show <id|задача>");
+        warn(t!(
+            "usage: disp show <id|task>",
+            "использование: disp show <id|задача>",
+            "використання: disp show <id|завдання>"
+        ));
         return 2;
     };
     let board = Board::load();
@@ -181,7 +195,8 @@ pub fn show(args: &[String]) -> u8 {
         })
         .collect();
     if found.is_empty() {
-        emit(&format!("Не найдено: {query}\n"));
+        emit(&not_found(query));
+        emit("\n");
         return 0;
     }
     let mut out = String::new();
@@ -196,52 +211,70 @@ pub fn show(args: &[String]) -> u8 {
 fn details(row: &Row) -> String {
     let s = &row.session;
     let mut lines = vec![format!("{}  {}  [{}]", row.sid, s.label(), s.agent)];
+    // Поле подробностей: название и значение, значения выровнены.
+    let field = |key: &str, value: &str| format!("  {:<10} {value}", format!("{key}:"));
     let closed = if s.ended {
-        let reason = s.end_reason.as_deref().filter(|reason| !reason.is_empty());
-        format!(
-            " (сессия закрыта{})",
-            reason
-                .map(|reason| format!(": {reason}"))
-                .unwrap_or_default()
+        let reason = s
+            .end_reason
+            .as_deref()
+            .filter(|reason| !reason.is_empty())
+            .map(|reason| format!(": {reason}"))
+            .unwrap_or_default();
+        tr!(
+            " (session closed{reason})",
+            " (сессия закрыта{reason})",
+            " (сесію закрито{reason})"
         )
     } else {
         String::new()
     };
-    lines.push(format!(
-        "  статус:    {}{closed}{}",
-        s.status.as_str(),
-        if s.accepted { " [убрано]" } else { "" }
-    ));
+    let removed = if s.accepted {
+        t!(" [removed]", " [убрано]", " [прибрано]")
+    } else {
+        ""
+    };
+    let status = format!("{}{closed}{removed}", s.status.as_str());
+    lines.push(field(t!("status", "статус", "статус"), &status));
     if !s.detail.is_empty() {
-        lines.push(format!("  деталь:    {}", s.detail));
+        lines.push(field(t!("detail", "деталь", "деталь"), &s.detail));
     }
-    lines.push(format!("  что:       {}", s.title));
+    lines.push(field(t!("what", "что", "що"), &s.title));
     if let Some(prompt) = s
         .last_prompt
         .as_deref()
         .filter(|text| !text.is_empty() && *text != s.title)
     {
-        lines.push(format!("  промпт:    {prompt}"));
+        lines.push(field(t!("prompt", "промпт", "промпт"), prompt));
     }
     if let Some(reply) = s.last_reply.as_deref().filter(|text| !text.is_empty()) {
-        lines.push(format!("  ответ:     {reply}"));
+        lines.push(field(t!("reply", "ответ", "відповідь"), reply));
     }
-    lines.push(format!("  где:       {}", or_question(&s.place)));
-    lines.push(format!("  каталог:   {}", s.cwd));
-    lines.push(format!("  сессия:    {}", s.session_id));
-    lines.push(format!("  начата:    {}", utc(s.started)));
-    lines.push(format!("  обновлена: {}", utc(s.updated)));
+    lines.push(field(t!("where", "где", "де"), or_question(&s.place)));
+    lines.push(field(t!("directory", "каталог", "каталог"), &s.cwd));
+    lines.push(field(t!("session", "сессия", "сесія"), &s.session_id));
+    lines.push(field(t!("started", "начата", "почато"), &utc(s.started)));
+    lines.push(field(t!("updated", "обновлена", "оновлено"), &utc(s.updated)));
     if let Some(done_at) = s.done_at {
-        lines.push(format!("  ход окончен: {}", utc(done_at)));
+        lines.push(field(t!("turn ended", "ход окончен", "хід завершено"), &utc(done_at)));
     }
     if s.subagents > 0 {
-        lines.push(format!("  субагентов в работе: {}", s.subagents));
+        let count = s.subagents;
+        lines.push(tr!(
+            "  subagents running: {count}",
+            "  субагентов в работе: {count}",
+            "  субагентів у роботі: {count}"
+        ));
     }
     if s.bg > 0 {
-        lines.push(format!("  фоновых задач на момент остановки: {}", s.bg));
+        let count = s.bg;
+        lines.push(tr!(
+            "  background tasks at stop: {count}",
+            "  фоновых задач на момент остановки: {count}",
+            "  фонових задач на момент зупинки: {count}"
+        ));
     }
     if !s.subtasks.is_empty() {
-        lines.push("  подзадачи:".to_string());
+        lines.push(tr!("  subtasks:", "  подзадачи:", "  підзадачі:"));
         for task in s.subtasks.values() {
             lines.push(format!(
                 "    [{}] {}",
@@ -282,10 +315,19 @@ fn matching(board: &Board, query: &str) -> Vec<Row> {
         .collect()
 }
 
+/// «Не найдено: …» на языке интерфейса.
+fn not_found(query: &str) -> String {
+    tr!("Not found: {query}", "Не найдено: {query}", "Не знайдено: {query}")
+}
+
 /// `disp ok [-f] <id|задача>... | --ended | --done`: принять результат.
 pub fn ok(args: &[String]) -> u8 {
     if args.is_empty() {
-        warn("использование: disp ok [-f] <id|задача>... | --ended | --done");
+        warn(t!(
+            "usage: disp ok [-f] <id|task>... | --ended | --done",
+            "использование: disp ok [-f] <id|задача>... | --ended | --done",
+            "використання: disp ok [-f] <id|завдання>... | --ended | --done"
+        ));
         return 2;
     }
     let is_force = |arg: &String| arg == "-f" || arg == "--force";
@@ -299,27 +341,44 @@ pub fn ok(args: &[String]) -> u8 {
             match board::accept(&mut row, board.now, force) {
                 Ok(Accepted::Yes) => {
                     accepted += 1;
-                    emit(&format!("убрано: {summary}\n"));
+                    emit(&tr!(
+                        "removed: {summary}\n",
+                        "убрано: {summary}\n",
+                        "прибрано: {summary}\n"
+                    ));
                 }
                 Ok(Accepted::StillActive) => {
                     skipped += 1;
                     let state = if row.session.status == Status::Waiting {
-                        "ждёт тебя"
+                        t!("waiting for you", "ждёт тебя", "чекає на тебе")
                     } else {
-                        "работает"
+                        t!("working", "работает", "працює")
                     };
-                    warn(&format!("пропущено (ещё {state}): {summary}"));
+                    warn(&tr!(
+                        "skipped (still {state}): {summary}",
+                        "пропущено (ещё {state}): {summary}",
+                        "пропущено (ще {state}): {summary}"
+                    ));
                 }
                 Err(_) => {}
             }
         }
     }
     if skipped > 0 {
-        warn("Активные сессии не убраны. Если сессия мертва: disp ok -f <id>");
+        warn(t!(
+            "Active sessions were not removed. If a session is dead: disp ok -f <id>",
+            "Активные сессии не убраны. Если сессия мертва: disp ok -f <id>",
+            "Активні сесії не прибрано. Якщо сесія мертва: disp ok -f <id>"
+        ));
     }
     if accepted == 0 {
         if skipped == 0 {
-            warn(&format!("Ничего не найдено под: {}", args.join(" ")));
+            let query = args.join(" ");
+            warn(&tr!(
+                "Nothing found for: {query}",
+                "Ничего не найдено под: {query}",
+                "Нічого не знайдено за: {query}"
+            ));
         }
         return 1;
     }
@@ -329,30 +388,38 @@ pub fn ok(args: &[String]) -> u8 {
 /// `disp yes <id|задача>`: ответить агенту вариантом по умолчанию — нажать Enter в его
 /// панели zellij. Только для одной сессии, которая сейчас ждёт человека.
 pub fn yes(args: &[String]) -> u8 {
+    let usage = || {
+        warn(t!(
+            "usage: disp yes <id|task>",
+            "использование: disp yes <id|задача>",
+            "використання: disp yes <id|завдання>"
+        ));
+        2
+    };
     let [query] = args else {
-        warn("использование: disp yes <id|задача>");
-        return 2;
+        return usage();
     };
     if query.starts_with('-') {
-        warn("использование: disp yes <id|задача>");
-        return 2;
+        return usage();
     }
     let board = Board::load();
     let found = matching(&board, query);
     let row = match found.as_slice() {
         [] => {
-            warn(&format!("Не найдено: {query}"));
+            warn(&not_found(query));
             return 1;
         }
         [row] => row,
         _ => {
-            warn(&format!(
-                "Под «{query}» несколько сессий ({}); укажи id",
-                found
-                    .iter()
-                    .map(|row| row.sid.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+            let ids = found
+                .iter()
+                .map(|row| row.sid.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            warn(&tr!(
+                "Several sessions match «{query}» ({ids}); give the id",
+                "Под «{query}» несколько сессий ({ids}); укажи id",
+                "Під «{query}» кілька сесій ({ids}); вкажи id"
             ));
             return 1;
         }
@@ -360,7 +427,7 @@ pub fn yes(args: &[String]) -> u8 {
     // Enter уходит в панель агента: решаем по только что перечитанной записи.
     let _lock = board.store.lock();
     let Some(session) = store::read_session(&row.path) else {
-        warn(&format!("Не найдено: {query}"));
+        warn(&not_found(query));
         return 1;
     };
     match panes::approve(&session) {
@@ -377,13 +444,19 @@ pub fn yes(args: &[String]) -> u8 {
 
 /// `disp name <id> <текст>`: дать строке понятное название.
 pub fn name(args: &[String]) -> u8 {
+    let usage = || {
+        warn(t!(
+            "usage: disp name <id> <text>",
+            "использование: disp name <id> <текст>",
+            "використання: disp name <id> <текст>"
+        ));
+        2
+    };
     let [query, words @ ..] = args else {
-        warn("использование: disp name <id> <текст>");
-        return 2;
+        return usage();
     };
     if words.is_empty() {
-        warn("использование: disp name <id> <текст>");
-        return 2;
+        return usage();
     }
     let title = words.join(" ");
     let board = Board::load();
@@ -398,7 +471,7 @@ pub fn name(args: &[String]) -> u8 {
         }
     }
     if renamed == 0 {
-        warn(&format!("Не найдено: {query}"));
+        warn(&not_found(query));
         return 1;
     }
     0
@@ -465,9 +538,17 @@ pub fn label() -> u8 {
             labelled += 1;
         }
     }
-    emit(&format!("подписано панелей: {labelled}\n"));
+    emit(&tr!(
+        "panes labelled: {labelled}\n",
+        "подписано панелей: {labelled}\n",
+        "підписано панелей: {labelled}\n"
+    ));
     if !panes::enabled(&board.settings) {
-        emit("Подписи не будут обновляться сами: добавь DISP_PANE_LABEL=1 в настройки.\n");
+        emit(t!(
+            "Labels will not update by themselves: add DISP_PANE_LABEL=1 to the settings.\n",
+            "Подписи не будут обновляться сами: добавь DISP_PANE_LABEL=1 в настройки.\n",
+            "Підписи не оновлюватимуться самі: додай DISP_PANE_LABEL=1 до налаштувань.\n"
+        ));
     }
     0
 }
@@ -476,7 +557,11 @@ pub fn label() -> u8 {
 /// и исправить по нему задачу. Панель делает это сама при запуске.
 pub fn repair() -> u8 {
     let repaired = board::repair_roots(&Board::load());
-    emit(&format!("исправлено записей: {repaired}\n"));
+    emit(&tr!(
+        "records repaired: {repaired}\n",
+        "исправлено записей: {repaired}\n",
+        "виправлено записів: {repaired}\n"
+    ));
     0
 }
 
@@ -488,7 +573,11 @@ pub fn repair() -> u8 {
 pub fn gui(args: &[String]) -> u8 {
     let board = Board::load();
     let Some(program) = gui_program(&board) else {
-        warn("disp gui: не найдена программа disp-gui (собрать и поставить: make install-gui)");
+        warn(t!(
+            "disp gui: disp-gui not found (build and install: make install-gui)",
+            "disp gui: не найдена программа disp-gui (собрать и поставить: make install-gui)",
+            "disp gui: не знайдено програму disp-gui (зібрати й поставити: make install-gui)"
+        ));
         return 1;
     };
     tray_alongside(&board);
@@ -510,17 +599,25 @@ pub fn gui(args: &[String]) -> u8 {
             command
         }
         (Some(_), None) => {
-            warn(
+            warn(t!(
+                "disp gui: term-everything not found, the window opens on the desktop \
+                 (its path: DISP_TERM_EVERYTHING in the settings)",
                 "disp gui: term-everything не найден, окно откроется на рабочем столе \
                  (путь к нему: DISP_TERM_EVERYTHING в настройках)",
-            );
+                "disp gui: term-everything не знайдено, вікно відкриється на робочому столі \
+                 (шлях до нього: DISP_TERM_EVERYTHING у налаштуваннях)"
+            ));
             Command::new(&program)
         }
         (None, _) => Command::new(&program),
     };
     // При успехе управление сюда не возвращается.
     let err = command.exec();
-    warn(&format!("disp gui: не удалось запустить: {err}"));
+    warn(&tr!(
+        "disp gui: could not start: {err}",
+        "disp gui: не удалось запустить: {err}",
+        "disp gui: не вдалося запустити: {err}"
+    ));
     1
 }
 
@@ -582,7 +679,13 @@ pub fn start_tray(board: &Board) -> TrayStart {
     match board.store.tray_lock() {
         Ok(Some(_free)) => {}
         Ok(None) => return TrayStart::Running,
-        Err(err) => return TrayStart::Failed(format!("не проверить, запущен ли значок: {err}")),
+        Err(err) => {
+            return TrayStart::Failed(tr!(
+                "cannot check whether the icon is running: {err}",
+                "не проверить, запущен ли значок: {err}",
+                "не перевірити, чи запущено значок: {err}"
+            ));
+        }
     }
     let output = Command::new(&program)
         .arg("--detach")
@@ -600,7 +703,12 @@ pub fn start_tray(board: &Board) -> TrayStart {
         Ok(output) => {
             let said = String::from_utf8_lossy(&output.stderr).trim().to_string();
             TrayStart::Failed(if said.is_empty() {
-                format!("{} вышла с {}", program.display(), output.status)
+                let (program, status) = (program.display(), output.status);
+                tr!(
+                    "{program} exited with {status}",
+                    "{program} вышла с {status}",
+                    "{program} завершилася з {status}"
+                )
             } else {
                 said
             })
@@ -635,36 +743,58 @@ pub fn tray(args: &[String]) -> u8 {
     let board = Board::load();
     if !args.is_empty() {
         let Some(program) = tray_program(&board) else {
-            warn(TRAY_MISSING);
+            warn(tray_missing());
             return 1;
         };
         let err = Command::new(&program).args(args).exec();
-        warn(&format!("disp tray: не удалось запустить: {err}"));
+        warn(&tray_failed(&err.to_string()));
         return 1;
     }
     match start_tray(&board) {
         TrayStart::Started => {
-            emit("disp tray: значок в трее запущен\n");
+            emit(t!(
+                "disp tray: the tray icon is running\n",
+                "disp tray: значок в трее запущен\n",
+                "disp tray: значок у треї запущено\n"
+            ));
             0
         }
         TrayStart::Running => {
-            emit("disp tray: значок уже в трее\n");
+            emit(t!(
+                "disp tray: the icon is already in the tray\n",
+                "disp tray: значок уже в трее\n",
+                "disp tray: значок уже в треї\n"
+            ));
             0
         }
         TrayStart::Missing => {
-            warn(TRAY_MISSING);
+            warn(tray_missing());
             1
         }
         TrayStart::Failed(err) => {
-            warn(&format!("disp tray: не удалось запустить: {err}"));
+            warn(&tray_failed(&err));
             1
         }
     }
 }
 
 /// Сообщение о том, что программы значка нет.
-const TRAY_MISSING: &str =
-    "disp tray: не найдена программа disp-tray (собрать и поставить: make install-tray)";
+fn tray_missing() -> &'static str {
+    t!(
+        "disp tray: disp-tray not found (build and install: make install-tray)",
+        "disp tray: не найдена программа disp-tray (собрать и поставить: make install-tray)",
+        "disp tray: не знайдено програму disp-tray (зібрати й поставити: make install-tray)"
+    )
+}
+
+/// Сообщение о том, что значок не запустился.
+fn tray_failed(err: &str) -> String {
+    tr!(
+        "disp tray: could not start: {err}",
+        "disp tray: не удалось запустить: {err}",
+        "disp tray: не вдалося запустити: {err}"
+    )
+}
 
 /// Программа term-everything: `DISP_TERM_EVERYTHING` или `term-everything` в `PATH`.
 fn term_everything(board: &Board) -> Option<PathBuf> {
@@ -707,9 +837,17 @@ pub fn unlabel() -> u8 {
         }
     }
     let cleared: usize = sessions.iter().map(|zellij| panes::clear_all(zellij)).sum();
-    emit(&format!("снято подписей: {cleared}\n"));
+    emit(&tr!(
+        "labels removed: {cleared}\n",
+        "снято подписей: {cleared}\n",
+        "знято підписів: {cleared}\n"
+    ));
     if panes::enabled(&board.settings) {
-        emit("Подписи появятся снова: убери DISP_PANE_LABEL=1 из настроек.\n");
+        emit(t!(
+            "Labels will come back: remove DISP_PANE_LABEL=1 from the settings.\n",
+            "Подписи появятся снова: убери DISP_PANE_LABEL=1 из настроек.\n",
+            "Підписи з'являться знову: прибери DISP_PANE_LABEL=1 з налаштувань.\n"
+        ));
     }
     0
 }
@@ -724,7 +862,7 @@ pub fn log(args: &[String]) -> u8 {
     let board = Board::load();
     let paths = &board.store.paths;
     if fs::metadata(paths.events()).map_or(0, |meta| meta.len()) == 0 {
-        emit("Журнал пуст.\n");
+        emit(t!("The journal is empty.\n", "Журнал пуст.\n", "Журнал порожній.\n"));
         return 0;
     }
     let mut out = String::new();
@@ -770,8 +908,10 @@ pub fn gc(args: &[String]) -> u8 {
             let _ = store::write_atomic(&events, kept.as_bytes(), 0o600);
         }
     }
-    emit(&format!(
-        "удалено записей: {removed} (убранные и пустые старше {days} дн.)\n"
+    emit(&tr!(
+        "records deleted: {removed} (removed and empty ones older than {days} days)\n",
+        "удалено записей: {removed} (убранные и пустые старше {days} дн.)\n",
+        "видалено записів: {removed} (прибрані й порожні, старші за {days} дн.)\n"
     ));
     0
 }
@@ -784,43 +924,67 @@ pub fn doctor() -> u8 {
         .and_then(fs::canonicalize)
         .unwrap_or_default();
     let mut out = format!("disp {VERSION}\n");
-    out.push_str(&format!("программа: {}\n", exe.display()));
-    out.push_str(&format!("состояние: {}\n", paths.state_dir.display()));
+    let (program, state, conf) = (
+        exe.display(),
+        paths.state_dir.display(),
+        paths.conf_file.display(),
+    );
+    out.push_str(&tr!(
+        "program: {program}\n",
+        "программа: {program}\n",
+        "програма: {program}\n"
+    ));
+    out.push_str(&tr!(
+        "state: {state}\n",
+        "состояние: {state}\n",
+        "стан: {state}\n"
+    ));
     let conf_note = if paths.conf_file.is_file() {
         ""
     } else {
-        " (нет файла)"
+        t!(" (no file)", " (нет файла)", " (немає файлу)")
     };
-    out.push_str(&format!(
-        "настройки: {}{conf_note}\n",
-        paths.conf_file.display()
+    out.push_str(&tr!(
+        "settings: {conf}{conf_note}\n",
+        "настройки: {conf}{conf_note}\n",
+        "налаштування: {conf}{conf_note}\n"
+    ));
+    let lang = crate::i18n::lang().code();
+    out.push_str(&tr!(
+        "language: {lang} (DISP_LANG=en|ru|uk)\n",
+        "язык: {lang} (DISP_LANG=en|ru|uk)\n",
+        "мова: {lang} (DISP_LANG=en|ru|uk)\n"
     ));
     for tool in [crate::notify::DESKTOP_TOOL, "curl", "zellij"] {
         let mark = if which(tool).is_some() {
             "ok "
         } else {
-            "нет"
+            t!("no ", "нет", "нема")
         };
         out.push_str(&format!("  {mark}  {tool}\n"));
     }
     let telegram = board.settings.get("DISP_TG_TOKEN").is_some()
         && board.settings.get("DISP_TG_CHAT").is_some();
-    out.push_str(&format!(
-        "подписи панелей: {}\n",
-        if panes::enabled(&board.settings) {
-            "включены"
-        } else {
-            "выключены (DISP_PANE_LABEL=1 включает)"
-        }
+    let labels = if panes::enabled(&board.settings) {
+        t!("on", "включены", "увімкнено")
+    } else {
+        t!(
+            "off (DISP_PANE_LABEL=1 turns them on)",
+            "выключены (DISP_PANE_LABEL=1 включает)",
+            "вимкнено (DISP_PANE_LABEL=1 вмикає)"
+        )
+    };
+    out.push_str(&tr!(
+        "pane labels: {labels}\n",
+        "подписи панелей: {labels}\n",
+        "підписи панелей: {labels}\n"
     ));
-    out.push_str(&format!(
-        "Telegram:  {}\n",
-        if telegram {
-            "настроен"
-        } else {
-            "не настроен"
-        }
-    ));
+    let telegram = if telegram {
+        t!("configured", "настроен", "налаштовано")
+    } else {
+        t!("not configured", "не настроен", "не налаштовано")
+    };
+    out.push_str(&format!("Telegram:  {telegram}\n"));
 
     let rows = board.rows();
     for agent in ["claude", "codex", "gemini"] {
@@ -830,18 +994,26 @@ pub fn doctor() -> u8 {
             .map(|row| row.session.updated)
             .max();
         let seen = match last {
-            Some(ts) => format!(
-                "последнее событие {} мин назад",
-                (board.now - ts).max(0) / 60
-            ),
-            None => "событий не было".to_string(),
+            Some(ts) => {
+                let minutes = (board.now - ts).max(0) / 60;
+                tr!(
+                    "last event {minutes} min ago",
+                    "последнее событие {minutes} мин назад",
+                    "остання подія {minutes} хв тому"
+                )
+            }
+            None => tr!("no events yet", "событий не было", "подій не було"),
         };
         out.push_str(&format!("  {agent:<7} {seen}\n"));
     }
     if let Ok(log) = fs::read(paths.hook_log())
         && !log.is_empty()
     {
-        out.push_str("последние строки hook.log:\n");
+        out.push_str(t!(
+            "last lines of hook.log:\n",
+            "последние строки hook.log:\n",
+            "останні рядки hook.log:\n"
+        ));
         let text = String::from_utf8_lossy(&log);
         let lines: Vec<&str> = text.lines().collect();
         for line in &lines[lines.len().saturating_sub(5)..] {
@@ -854,7 +1026,43 @@ pub fn doctor() -> u8 {
 
 /// Справка по командам.
 pub fn usage() -> String {
-    format!(
+    tr!(
+        "disp {VERSION} — dispatcher for AI agent sessions
+
+  disp               table of open sessions (same as disp ls)
+  disp ls [-a]       -a: show removed ones too; --json: raw data
+  disp watch         live panel for its own zellij pane: arrows — select,
+                     a — answer the agent “yes”, x — remove, g — go to the agent,
+                     t — timeline,
+                     ? — all keys; also shows the tray icon
+                     (DISP_TRAY=0 in the settings — do not show it)
+  disp watch --plain [sec]   table without controls, refreshed every N seconds
+  disp gui           graphical shell: inside the terminal pane via term-everything,
+                     with --window — as a normal desktop window
+  disp tray          only the tray icon (Linux, macOS): who is waiting, “yes”,
+                     “go to”, “remove” buttons; --autostart — show at login,
+                     --no-autostart — stop
+  disp show <id>     details: prompt, last reply, subtasks
+  disp ok <id|task>...     remove from the list: result reviewed
+  disp ok --ended    remove all closed sessions; --done: all finished ones
+  disp ok -f <id>    remove an active session (if it is actually dead)
+  disp yes <id>      answer a waiting agent “yes”: Enter in its zellij pane
+  disp name <id> <text>    give the row a clear name
+  disp log [N]       status journal: what happened while you were away
+  disp gc [days]     delete removed and empty records older than N days (7)
+  disp label         label the zellij panes of open sessions: “#number name”
+                     (they update by themselves with DISP_PANE_LABEL=1 in the settings)
+  disp unlabel       remove these labels from all panes
+  disp repair        fix the task of records from older versions (the panel does it itself)
+  disp install <claude|codex|gemini>  connect the hooks to the agent settings
+                     (adds only what is missing, keeps a .bak-disp copy)
+  disp config <claude|codex|gemini>   print the hook block for the agent
+  disp doctor        check the environment and which agents send events
+  disp hook <agent>  called by the agent hooks, not needed by hand
+
+Agents in containers are seen without hooks (DISP_CONTAINERS=0 turns it off).
+Language: DISP_LANG=en|ru|uk, otherwise the system language.
+",
         "disp {VERSION} — диспетчер сессий AI-агентов
 
   disp               таблица незакрытых сессий (то же, что disp ls)
@@ -870,7 +1078,7 @@ pub fn usage() -> String {
   disp tray          только значок в трее (Linux, macOS): кто ждёт, кнопки «да»,
                      «перейти», «убрать»; --autostart — показывать при входе в систему,
                      --no-autostart — перестать
-  disp show <id>    подробности: промпт, последний ответ, подзадачи
+  disp show <id>     подробности: промпт, последний ответ, подзадачи
   disp ok <id|задача>...   убрать из списка: результат посмотрел
   disp ok --ended    убрать все закрытые сессии; --done: все законченные
   disp ok -f <id>    убрать активную сессию (если она на самом деле мертва)
@@ -887,6 +1095,45 @@ pub fn usage() -> String {
   disp config <claude|codex|gemini>   напечатать блок хуков для агента
   disp doctor        проверка окружения и того, какие агенты шлют события
   disp hook <agent>  вызывается хуками агента, вручную не нужен
+
+Агенты в контейнерах видны без хуков (DISP_CONTAINERS=0 — выключить).
+Язык: DISP_LANG=en|ru|uk, иначе — язык системы.
+",
+        "disp {VERSION} — диспетчер сесій AI-агентів
+
+  disp               таблиця незакритих сесій (те саме, що disp ls)
+  disp ls [-a]       -a: показати й прибрані; --json: сирі дані
+  disp watch         жива панель для окремої панелі zellij: стрілки — вибір,
+                     a — відповісти агентові «так», x — прибрати, g — перейти до агента,
+                     t — стрічка часу,
+                     ? — усі клавіші; заодно показує значок у треї
+                     (DISP_TRAY=0 у налаштуваннях — не показувати)
+  disp watch --plain [сек]   таблиця без керування, оновлюється раз на N секунд
+  disp gui           графічна оболонка: у панелі термінала через term-everything,
+                     з ключем --window — звичайним вікном на робочому столі
+  disp tray          лише значок у треї (Linux, macOS): хто чекає, кнопки «так»,
+                     «перейти», «прибрати»; --autostart — показувати під час входу в систему,
+                     --no-autostart — припинити
+  disp show <id>     подробиці: промпт, остання відповідь, підзадачі
+  disp ok <id|завдання>... прибрати зі списку: результат переглянуто
+  disp ok --ended    прибрати всі закриті сесії; --done: усі завершені
+  disp ok -f <id>    прибрати активну сесію (якщо вона насправді мертва)
+  disp yes <id>      відповісти агентові, що чекає, «так»: Enter у його панелі zellij
+  disp name <id> <текст>   дати рядку зрозумілу назву
+  disp log [N]       журнал змін статусу: що відбувалося, поки тебе не було
+  disp gc [днів]     видалити прибрані й порожні записи, старші за N днів (7)
+  disp label         підписати панелі zellij відкритих сесій: «#номер назва»
+                     (самі оновлюються з DISP_PANE_LABEL=1 у налаштуваннях)
+  disp unlabel       зняти ці підписи з усіх панелей
+  disp repair        виправити завдання в записах попередніх версій (панель робить це сама)
+  disp install <claude|codex|gemini>  підключити хуки до налаштувань агента
+                     (додає лише відсутнє, робить копію .bak-disp)
+  disp config <claude|codex|gemini>   надрукувати блок хуків для агента
+  disp doctor        перевірка оточення й того, які агенти надсилають події
+  disp hook <agent>  викликається хуками агента, вручну не потрібен
+
+Агентів у контейнерах видно без хуків (DISP_CONTAINERS=0 — вимкнути).
+Мова: DISP_LANG=en|ru|uk, інакше — мова системи.
 "
     )
 }

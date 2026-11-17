@@ -14,6 +14,7 @@ use disp::panes;
 use disp::store::{self, Signature, Store};
 use disp::text::{age, latin_key};
 use disp::timeline::{History, Window, span_label};
+use disp::{t, tr};
 use slint::{ModelRc, SharedString, VecModel};
 
 use crate::{DetailField, Hint, Pressed, Segment, SessionRow, Tick};
@@ -232,7 +233,7 @@ impl State {
             if matches!(key, Pressed::Char('y' | 'Y' | 'н' | 'Н' | 'д' | 'Д')) {
                 self.accept(true);
             } else {
-                self.notify("не убрано", false);
+                self.notify(t!("not removed", "не убрано", "не прибрано"), false);
             }
             return Outcome::None;
         }
@@ -292,7 +293,14 @@ impl State {
         match name {
             // Enter уходит в панель агента: решаем по только что перечитанной записи.
             "approve" if row.view != View::Wait => {
-                self.notify("агент сейчас ничего не спрашивает", true);
+                self.notify(
+                    t!(
+                        "the agent is not asking anything now",
+                        "агент сейчас ничего не спрашивает",
+                        "агент зараз нічого не питає"
+                    ),
+                    true,
+                );
             }
             "approve" => self.approve(),
             // Убранную строку клавиша возвращает, про работающую сначала спрашивает.
@@ -327,9 +335,9 @@ impl State {
                 if panes::enabled(&board.settings) && !row.session.ended {
                     panes::apply(&row.session, true);
                 }
-                self.notify(format!("названо: {title}"), false);
+                self.notify(tr!("named: {title}", "названо: {title}", "названо: {title}"), false);
             }
-            Err(err) => self.notify(format!("не записано: {err}"), true),
+            Err(err) => self.notify(tr!("not saved: {err}", "не записано: {err}", "не записано: {err}"), true),
         }
         drop(lock);
         self.reload();
@@ -340,10 +348,13 @@ impl State {
             return;
         };
         match board::accept(&mut row, board.now, force) {
-            Ok(Accepted::Yes) => self.notify(format!("убрано: {}", row.summary()), false),
+            Ok(Accepted::Yes) => {
+                let summary = row.summary();
+                self.notify(tr!("removed: {summary}", "убрано: {summary}", "прибрано: {summary}"), false);
+            }
             // Пока мы смотрели на экран, сессия снова заработала: спрашиваем.
             Ok(Accepted::StillActive) => self.confirm = true,
-            Err(err) => self.notify(format!("не записано: {err}"), true),
+            Err(err) => self.notify(tr!("not saved: {err}", "не записано: {err}", "не записано: {err}"), true),
         }
         drop(lock);
         self.reload();
@@ -367,8 +378,18 @@ impl State {
             return;
         };
         match board::unaccept(&mut row) {
-            Ok(()) => self.notify(format!("возвращено в список: {}", row.summary()), false),
-            Err(err) => self.notify(format!("не записано: {err}"), true),
+            Ok(()) => {
+                let summary = row.summary();
+                self.notify(
+                    tr!(
+                        "back in the list: {summary}",
+                        "возвращено в список: {summary}",
+                        "повернуто до списку: {summary}"
+                    ),
+                    false,
+                );
+            }
+            Err(err) => self.notify(tr!("not saved: {err}", "не записано: {err}", "не записано: {err}"), true),
         }
         drop(lock);
         self.reload();
@@ -381,7 +402,14 @@ impl State {
         match board.fresh(&path) {
             Some((lock, row)) => Some((board, lock, row)),
             None => {
-                self.notify("этой сессии уже нет в списке", true);
+                self.notify(
+                    t!(
+                        "this session is no longer in the list",
+                        "этой сессии уже нет в списке",
+                        "цієї сесії вже немає в списку"
+                    ),
+                    true,
+                );
                 None
             }
         }
@@ -391,7 +419,8 @@ impl State {
     fn resort(&mut self) {
         let rows = std::mem::take(&mut self.rows);
         self.set_rows(rows, self.now);
-        self.notify(format!("сортировка: {}", self.sort.label()), false);
+        let sort = self.sort.label();
+        self.notify(tr!("sort: {sort}", "сортировка: {sort}", "сортування: {sort}"), false);
     }
 
     /// Меняет длину окна ленты на `steps` ступеней: меньше нуля — ближе, больше — дальше.
@@ -429,15 +458,19 @@ impl State {
             _ => Vec::new(),
         };
         let question = match selected {
-            Some(row) if self.confirm => format!(
-                "{} ещё {}. Убрать из списка всё равно?  y — да, любая другая клавиша — нет",
-                row.sid,
-                if row.view == View::Wait {
-                    "ждёт тебя"
+            Some(row) if self.confirm => {
+                let sid = &row.sid;
+                let state = if row.view == View::Wait {
+                    t!("waiting for you", "ждёт тебя", "чекає на тебе")
                 } else {
-                    "работает"
-                }
-            ),
+                    t!("working", "работает", "працює")
+                };
+                tr!(
+                    "{sid} is still {state}. Remove it from the list anyway?  y — yes, any other key — no",
+                    "{sid} ещё {state}. Убрать из списка всё равно?  y — да, любая другая клавиша — нет",
+                    "{sid} ще {state}. Прибрати зі списку все одно?  y — так, будь-яка інша клавіша — ні"
+                )
+            }
             _ => String::new(),
         };
         let count = |value: usize| i32::try_from(value).unwrap_or(i32::MAX);
@@ -527,7 +560,7 @@ impl State {
 /// Возраст строки с точностью до минуты: окно в простое обновляется раз в минуту.
 fn coarse_age(seconds: i64) -> String {
     if seconds < 60 {
-        "<1м".to_string()
+        tr!("<1m", "<1м", "<1хв")
     } else {
         age(seconds)
     }
@@ -587,22 +620,28 @@ fn hints(width: f32) -> Vec<Hint> {
         text: text.into(),
     };
     let lanes = width >= LANE_FROM_WIDTH;
-    let mut out = vec![hint("↑↓", "выбор"), hint("Enter", "подробности")];
+    let mut out = vec![
+        hint("↑↓", t!("select", "выбор", "вибір")),
+        hint("Enter", t!("details", "подробности", "подробиці")),
+    ];
     out.extend([
-        hint("a", "принять"),
-        hint("x", "убрать"),
-        hint("g", "перейти"),
+        hint("a", t!("approve", "принять", "прийняти")),
+        hint("x", t!("remove", "убрать", "прибрати")),
+        hint("g", t!("go to", "перейти", "перейти")),
     ]);
     if width >= 760.0 {
-        out.extend([hint("n", "назвать"), hint("s", "сортировка")]);
+        out.extend([
+            hint("n", t!("name", "назвать", "назвати")),
+            hint("s", t!("sort", "сортировка", "сортування")),
+        ]);
     }
     if lanes && width >= 900.0 {
-        out.push(hint("+/-", "масштаб ленты"));
+        out.push(hint("+/-", t!("timeline zoom", "масштаб ленты", "масштаб стрічки")));
     }
     if width >= 1040.0 {
-        out.push(hint("Tab", "все"));
+        out.push(hint("Tab", t!("all", "все", "усі")));
     }
-    out.push(hint("q", "выход"));
+    out.push(hint("q", t!("quit", "выход", "вихід")));
     if width < 520.0 {
         out.drain(..2);
     }
@@ -619,6 +658,8 @@ mod tests {
     use super::*;
 
     fn row(agent: &str, task: &str, status: Status, updated: i64) -> Row {
+        // Ожидания тестов написаны по-русски.
+        disp::i18n::set(disp::i18n::Lang::Ru);
         let session = Session {
             agent: agent.to_string(),
             session_id: format!("0000-{task}"),
@@ -638,6 +679,7 @@ mod tests {
     }
 
     fn state() -> State {
+        disp::i18n::set(disp::i18n::Lang::Ru);
         let paths = Paths {
             state_dir: PathBuf::from("/nonexistent/state"),
             sessions: PathBuf::from("/nonexistent/state/sessions"),

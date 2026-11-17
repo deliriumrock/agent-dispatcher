@@ -15,6 +15,7 @@ use crate::panes;
 use crate::procs::{self, Activity};
 use crate::store::{self, JournalEvent, Store};
 use crate::text::{age, dur, home_relative, local_time, unmarked};
+use crate::{t, tr};
 
 /// Сколько секунд простаивающая сессия остаётся в таблице.
 const IDLE_VISIBLE_SEC: i64 = 43_200;
@@ -73,11 +74,12 @@ impl Row {
         match activity {
             Activity::Command { text, since } => {
                 self.view = View::Work;
-                self.note = Some(format!("команда {}: {text}", age(now - since)));
+                let took = age(now - since);
+                self.note = Some(tr!("command {took}: {text}", "команда {took}: {text}", "команда {took}: {text}"));
             }
             Activity::Gone => {
                 self.view = View::Lost;
-                self.note = Some("агент закрыт".to_string());
+                self.note = Some(tr!("agent closed", "агент закрыт", "агент закрито"));
             }
             Activity::Stuck => self.view = View::Stuck,
             Activity::Unknown => {}
@@ -92,7 +94,7 @@ impl Row {
     /// Колонка «ГДЕ»: место сессии, а для закрытой — пометка об этом.
     pub fn place(&self) -> &str {
         if self.session.ended {
-            "закрыта"
+            t!("closed", "закрыта", "закрита")
         } else {
             or_question(&self.session.place)
         }
@@ -123,10 +125,12 @@ impl Row {
             format!("{done}/{}", s.subtasks.len())
         };
         if s.subagents > 0 {
-            out.push_str(&format!(" а{}", s.subagents));
+            let count = s.subagents;
+            out.push_str(&tr!(" a{count}", " а{count}", " а{count}"));
         }
         if s.bg > 0 {
-            out.push_str(&format!(" ф{}", s.bg));
+            let count = s.bg;
+            out.push_str(&tr!(" b{count}", " ф{count}", " ф{count}"));
         }
         out
     }
@@ -139,12 +143,15 @@ impl Row {
         let mut what = self.what();
         if s.title.is_empty() {
             let fallback = filled(&s.last_prompt).or_else(|| {
-                filled(&s.last_reply).map(|reply| format!("ответ: {}", unmarked(&reply)))
+                filled(&s.last_reply).map(|reply| {
+                    let reply = unmarked(&reply);
+                    tr!("reply: {reply}", "ответ: {reply}", "відповідь: {reply}")
+                })
             });
             what.push_str(&fallback.unwrap_or_default());
         }
         if s.accepted {
-            format!("[убрано] {what}")
+            tr!("[removed] {what}", "[убрано] {what}", "[прибрано] {what}")
         } else {
             what
         }
@@ -212,59 +219,67 @@ pub fn details(row: &Row, now: i64) -> Vec<Detail> {
         status.push_str(&format!(" · {}", s.detail));
     }
     if s.ended {
-        status.push_str(" · сессия закрыта");
+        status.push_str(t!(" · session closed", " · сессия закрыта", " · сесію закрито"));
         if let Some(reason) = s.end_reason.as_deref().filter(|reason| !reason.is_empty()) {
             status.push_str(&format!(" ({reason})"));
         }
     }
     if s.accepted {
-        status.push_str(" · убрано из списка");
+        status.push_str(t!(" · removed from the list", " · убрано из списка", " · прибрано зі списку"));
     }
-    field("статус", status, Tone::Status);
-    field("что", s.title.clone(), Tone::Plain);
+    field(t!("status", "статус", "статус"), status, Tone::Status);
+    field(t!("what", "что", "що"), s.title.clone(), Tone::Plain);
     if let Some(prompt) = s.last_prompt.as_deref().filter(|text| *text != s.title) {
-        field("промпт", prompt.to_string(), Tone::Plain);
+        field(t!("prompt", "промпт", "промпт"), prompt.to_string(), Tone::Plain);
     }
     if let Some(reply) = s.last_reply.as_deref() {
-        field("ответ", reply.to_string(), Tone::Plain);
+        field(t!("reply", "ответ", "відповідь"), reply.to_string(), Tone::Plain);
     }
-    field("где", or_question(&s.place).to_string(), Tone::Plain);
+    field(t!("where", "где", "де"), or_question(&s.place).to_string(), Tone::Plain);
     // «Каталог» — тот, по которому названа задача: проект, над которым агент работает,
     // а если отдельного проекта нет — каталог запуска. Остальное показываем, когда отличается.
     let root = s.root.as_deref().unwrap_or(&s.cwd);
     let home = s.project.as_deref().unwrap_or(root);
-    field("каталог", home_relative(home), Tone::Plain);
+    field(t!("directory", "каталог", "каталог"), home_relative(home), Tone::Plain);
     if home != root {
-        field("запущен в", home_relative(root), Tone::Plain);
+        field(t!("started in", "запущен в", "запущено в"), home_relative(root), Tone::Plain);
     }
     if s.cwd != home && s.cwd != root {
-        field("сейчас в", home_relative(&s.cwd), Tone::Plain);
+        field(t!("now in", "сейчас в", "зараз у"), home_relative(&s.cwd), Tone::Plain);
     }
 
+    let started = local_time(s.started, "%d.%m %H:%M");
+    let ago = age(now - s.updated);
     let mut times = vec![
-        format!("начата {}", local_time(s.started, "%d.%m %H:%M")),
-        format!("событие {} назад", age(now - s.updated)),
+        tr!("started {started}", "начата {started}", "почато {started}"),
+        tr!("last event {ago} ago", "событие {ago} назад", "подія {ago} тому"),
     ];
     match (s.turn_started, s.done_at) {
         (Some(from), _) if s.status == Status::Working => {
-            times.push(format!("ход идёт {}", dur(now - from)));
+            let took = dur(now - from);
+            times.push(tr!("turn running {took}", "ход идёт {took}", "хід триває {took}"));
         }
-        (Some(from), Some(to)) if to >= from => times.push(format!("ход занял {}", dur(to - from))),
+        (Some(from), Some(to)) if to >= from => {
+            let took = dur(to - from);
+            times.push(tr!("turn took {took}", "ход занял {took}", "хід тривав {took}"));
+        }
         _ => {}
     }
-    field("время", times.join(" · "), Tone::Plain);
+    field(t!("time", "время", "час"), times.join(" · "), Tone::Plain);
 
     let mut extra = Vec::new();
     if s.subagents > 0 {
-        extra.push(format!("субагентов в работе: {}", s.subagents));
+        let count = s.subagents;
+        extra.push(tr!("subagents running: {count}", "субагентов в работе: {count}", "субагентів у роботі: {count}"));
     }
     if s.bg > 0 {
-        extra.push(format!("фоновых задач: {}", s.bg));
+        let count = s.bg;
+        extra.push(tr!("background tasks: {count}", "фоновых задач: {count}", "фонових задач: {count}"));
     }
-    field("ещё", extra.join(" · "), Tone::Plain);
-    field("сессия", s.session_id.clone(), Tone::Muted);
+    field(t!("also", "ещё", "ще"), extra.join(" · "), Tone::Plain);
+    field(t!("session", "сессия", "сесія"), s.session_id.clone(), Tone::Muted);
     if !s.subtasks.is_empty() {
-        field("подзадачи", row.subtasks(), Tone::Plain);
+        field(t!("subtasks", "подзадачи", "підзадачі"), row.subtasks(), Tone::Plain);
         for task in s.subtasks.values() {
             let (mark, tone) = if task.d {
                 ("[x]", Tone::Muted)
@@ -313,11 +328,11 @@ impl SortKey {
     /// Название поля для сообщений.
     pub fn title(self) -> &'static str {
         match self {
-            SortKey::Status => "статус",
-            SortKey::Agent => "агент",
-            SortKey::Task => "задача",
-            SortKey::Place => "где",
-            SortKey::Age => "возраст",
+            SortKey::Status => t!("status", "статус", "статус"),
+            SortKey::Agent => t!("agent", "агент", "агент"),
+            SortKey::Task => t!("task", "задача", "завдання"),
+            SortKey::Place => t!("where", "где", "де"),
+            SortKey::Age => t!("age", "возраст", "вік"),
         }
     }
 }
@@ -417,13 +432,20 @@ impl Counts {
     /// и готовыми, где они стоят и в таблице.
     pub fn line_with_idle(&self, idle: usize) -> String {
         let idle = if idle > 0 {
-            format!(" · простой: {idle}")
+            tr!(" · idle: {idle}", " · простой: {idle}", " · простій: {idle}")
         } else {
             String::new()
         };
-        format!(
-            "ждут тебя: {} · работают: {} · молчат: {}{idle} · готово: {}",
-            self.attention, self.working, self.quiet, self.done
+        let Counts {
+            attention,
+            working,
+            quiet,
+            done,
+        } = *self;
+        tr!(
+            "waiting: {attention} · working: {working} · quiet: {quiet}{idle} · done: {done}",
+            "ждут тебя: {attention} · работают: {working} · молчат: {quiet}{idle} · готово: {done}",
+            "чекають на тебе: {attention} · працюють: {working} · мовчать: {quiet}{idle} · готово: {done}"
         )
     }
 }
@@ -640,13 +662,13 @@ pub fn journal(paths: &Paths, limit: usize) -> Vec<JournalEvent> {
 /// Имя статуса в журнале, как его видит человек.
 pub fn status_name(status: &str) -> &str {
     match status {
-        "new" => "новая",
-        "idle" => "простой",
-        "working" => "работает",
-        "waiting" => "ЖДЁТ",
-        "done" => "ГОТОВО",
-        "error" => "СБОЙ",
-        "ended" => "закрыта",
+        "new" => t!("new", "новая", "нова"),
+        "idle" => t!("idle", "простой", "простій"),
+        "working" => t!("working", "работает", "працює"),
+        "waiting" => t!("WAITING", "ЖДЁТ", "ЧЕКАЄ"),
+        "done" => t!("DONE", "ГОТОВО", "ГОТОВО"),
+        "error" => t!("FAILED", "СБОЙ", "ЗБІЙ"),
+        "ended" => t!("closed", "закрыта", "закрита"),
         other => other,
     }
 }

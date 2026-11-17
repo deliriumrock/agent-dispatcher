@@ -42,6 +42,7 @@ use crate::notify;
 use crate::procs::Procs;
 use crate::store::{self, Store};
 use crate::text::oneline;
+use crate::tr;
 
 /// Как часто смотреть в контейнеры через `/proc` из одного процесса.
 const EVERY: Duration = Duration::from_secs(2);
@@ -810,16 +811,17 @@ fn payload(action: Action, state: &State, details: &Details) -> Map<String, Valu
 /// Чего ждёт агент, для колонки «ЧТО».
 fn waiting_detail(reason: &str) -> String {
     match reason {
-        "permission prompt" | "" => "разрешение".to_string(),
-        "input needed" => "нужен ответ".to_string(),
-        "dialog open" => "открыт диалог".to_string(),
+        "permission prompt" | "" => tr!("permission", "разрешение", "дозвіл"),
+        "input needed" => tr!("needs an answer", "нужен ответ", "потрібна відповідь"),
+        "dialog open" => tr!("dialog open", "открыт диалог", "відкрито діалог"),
         other => other.to_string(),
     }
 }
 
 /// Где идёт сессия: контейнер по первым восьми знакам идентификатора.
 fn place(container: &str) -> String {
-    format!("контейнер {}", container.get(..8).unwrap_or(container))
+    let id = container.get(..8).unwrap_or(container);
+    tr!("container {id}", "контейнер {id}", "контейнер {id}")
 }
 
 /// Записывает перемену в сессии `seen`, если она есть.

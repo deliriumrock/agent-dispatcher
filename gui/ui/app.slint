@@ -123,9 +123,30 @@ export global Theme {
     }
 }
 
+// Надписи окна на языке интерфейса: их ставит программа при запуске (`disp::i18n`).
+export global Texts {
+    in property <string> waiting: "waiting";
+    in property <string> working: "working";
+    in property <string> quiet: "quiet";
+    in property <string> done: "done";
+    in property <string> all: "all";
+    in property <string> sort: "sort";
+    in property <string> no-sessions: "No sessions.";
+    in property <string> no-open-sessions: "No open sessions.  Tab shows removed ones too.";
+    in property <string> approve: "Approve";
+    in property <string> remove: "Remove";
+    in property <string> focus: "Go to";
+    in property <string> rename: "Name";
+    in property <string> name-prompt: "name:";
+    in property <string> name-placeholder: "Enter — save, empty line — cancel";
+}
+
 // Счётчик в верхней полосе: плашка, когда не ноль.
 component Badge inherits Rectangle {
     in property <string> label;
+    // Значок вместо подписи, когда в полосе тесно: как в узкой панели `disp watch`.
+    in property <string> short;
+    in property <bool> compact;
     in property <int> count;
     in property <color> accent;
     in property <bool> filled;
@@ -139,7 +160,7 @@ component Badge inherits Rectangle {
         x: 8px;
         spacing: 5px;
         Text {
-            text: root.label;
+            text: root.compact ? root.short : root.label;
             color: root.filled && root.count > 0 ? #000000 : (root.count > 0 ? root.accent : Theme.muted);
             font-size: 13px;
             vertical-alignment: center;
@@ -333,6 +354,19 @@ export component AppWindow inherits Window {
     in property <bool> notice-error;
     in property <string> question;
     in property <bool> renaming;
+    // Что помещается в верхнюю полосу: решает программа по ширине окна (`header_fit`),
+    // а нужную ширину берёт из `*-width` ниже.
+    in property <bool> compact-badges;
+    in property <bool> show-sort: true;
+    in property <bool> show-clock: true;
+    in property <bool> show-version: true;
+    out property <length> title-width: measure-title.preferred-width;
+    out property <length> badges-width: measure-full.preferred-width;
+    out property <length> compact-width: measure-compact.preferred-width;
+    out property <length> sort-width: measure-sort.preferred-width;
+    out property <length> clock-width: measure-clock.preferred-width;
+    out property <length> version-width: measure-version.preferred-width;
+    property <string> sort-text: (root.show-all ? Texts.all + " · " : "") + Texts.sort + ": " + root.sort;
 
     // Клавиша: текст, зажат ли Ctrl. Возвращает, обработана ли она.
     callback key(string, bool) -> bool;
@@ -375,6 +409,80 @@ export component AppWindow inherits Window {
         }
     }
 
+    // Невидимые копии надписей верхней полосы: по их ширине программа решает, что
+    // в полосу поместится. В раскладку окна они не входят.
+    Rectangle {
+        visible: false;
+        width: 0;
+        height: 0;
+        measure-title := Text {
+            text: "disp";
+            font-size: 15px;
+            font-weight: 800;
+        }
+
+        measure-full := HorizontalLayout {
+            spacing: 4px;
+            Badge {
+                label: Texts.waiting;
+                count: root.waiting;
+            }
+
+            Badge {
+                label: Texts.working;
+                count: root.working;
+            }
+
+            Badge {
+                label: Texts.quiet;
+                count: root.silent;
+            }
+
+            Badge {
+                label: Texts.done;
+                count: root.unaccepted;
+            }
+        }
+
+        measure-compact := HorizontalLayout {
+            spacing: 4px;
+            Badge {
+                label: "!";
+                count: root.waiting;
+            }
+
+            Badge {
+                label: "●";
+                count: root.working;
+            }
+
+            Badge {
+                label: "?";
+                count: root.silent;
+            }
+
+            Badge {
+                label: "✓";
+                count: root.unaccepted;
+            }
+        }
+
+        measure-sort := Text {
+            text: root.sort-text;
+            font-size: 12px;
+        }
+
+        measure-clock := Text {
+            text: root.clock;
+            font-size: 12px;
+        }
+
+        measure-version := Text {
+            text: "disp " + root.version;
+            font-size: 12px;
+        }
+    }
+
     VerticalLayout {
         // Верхняя полоса: счётчики, сортировка, время.
         Rectangle {
@@ -399,7 +507,9 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         spacing: 4px;
                         Badge {
-                            label: "ждут тебя";
+                            label: Texts.waiting;
+                            short: "!";
+                            compact: root.compact-badges;
                             count: root.waiting;
                             accent: Theme.waiting;
                             filled: true;
@@ -407,19 +517,25 @@ export component AppWindow inherits Window {
 
                         // Порядок — как в таблице: ждут, работают, молчат, готово.
                         Badge {
-                            label: "работают";
+                            label: Texts.working;
+                            short: "●";
+                            compact: root.compact-badges;
                             count: root.working;
                             accent: Theme.working;
                         }
 
                         Badge {
-                            label: "молчат";
+                            label: Texts.quiet;
+                            short: "?";
+                            compact: root.compact-badges;
                             count: root.silent;
                             accent: Theme.quiet;
                         }
 
                         Badge {
-                            label: "готово";
+                            label: Texts.done;
+                            short: "✓";
+                            compact: root.compact-badges;
                             count: root.unaccepted;
                             accent: Theme.done;
                         }
@@ -430,21 +546,21 @@ export component AppWindow inherits Window {
                     horizontal-stretch: 1;
                 }
 
-                Text {
-                    text: (root.show-all ? "все · " : "") + "сорт: " + root.sort;
+                if root.show-sort: Text {
+                    text: root.sort-text;
                     color: Theme.text;
                     font-size: 12px;
                     vertical-alignment: center;
                 }
 
-                Text {
+                if root.show-clock: Text {
                     text: root.clock;
                     color: Theme.muted;
                     font-size: 12px;
                     vertical-alignment: center;
                 }
 
-                Text {
+                if root.show-version: Text {
                     text: "disp " + root.version;
                     color: Theme.muted;
                     font-size: 12px;
@@ -509,7 +625,7 @@ export component AppWindow inherits Window {
             if root.rows.length == 0: Text {
                 x: 14px;
                 y: 12px;
-                text: root.show-all ? "Сессий нет." : "Незакрытых сессий нет.  Tab покажет и убранные.";
+                text: root.show-all ? Texts.no-sessions : Texts.no-open-sessions;
                 color: Theme.muted;
             }
         }
@@ -545,10 +661,10 @@ export component AppWindow inherits Window {
                     }
 
                     for action in [
-                        { name: "approve", label: "Принять" },
-                        { name: "remove", label: "Убрать" },
-                        { name: "focus", label: "Перейти" },
-                        { name: "rename", label: "Назвать" },
+                        { name: "approve", label: Texts.approve },
+                        { name: "remove", label: Texts.remove },
+                        { name: "focus", label: Texts.focus },
+                        { name: "rename", label: Texts.rename },
                     ]: Rectangle {
                         width: label.preferred-width + 20px;
                         height: 24px;
@@ -603,7 +719,7 @@ export component AppWindow inherits Window {
                     padding-right: 12px;
                     spacing: 8px;
                     Text {
-                        text: "название:";
+                        text: Texts.name-prompt;
                         color: Theme.bright;
                         font-weight: 700;
                         vertical-alignment: center;
@@ -611,7 +727,7 @@ export component AppWindow inherits Window {
 
                     name-input := LineEdit {
                         horizontal-stretch: 1;
-                        placeholder-text: "Enter — сохранить, пустая строка — отмена";
+                        placeholder-text: Texts.name-placeholder;
                         accepted(text) => {
                             root.rename(text);
                         }
