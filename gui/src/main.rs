@@ -289,4 +289,98 @@ fn publish(app: &AppWindow, state: &State) {
     app.set_notice_error(view.notice_error);
     app.set_question(view.question);
     app.set_renaming(view.renaming);
+    let fit = header_fit(
+        logical_width(app),
+        &Header {
+            title: app.get_title_width(),
+            badges: app.get_badges_width(),
+            compact: app.get_compact_width(),
+            right: [
+                app.get_sort_width(),
+                app.get_clock_width(),
+                app.get_version_width(),
+            ],
+        },
+    );
+    app.set_compact_badges(fit.compact);
+    app.set_show_sort(fit.shown >= 1);
+    app.set_show_clock(fit.shown >= 2);
+    app.set_show_version(fit.shown >= 3);
+}
+
+/// Ширины частей верхней полосы окна, логические пиксели.
+struct Header {
+    /// Надпись «disp» слева.
+    title: f32,
+    /// Четыре счётчика с подписями.
+    badges: f32,
+    /// Те же счётчики со значками вместо подписей.
+    compact: f32,
+    /// Справа по порядку: сортировка, время, версия.
+    right: [f32; 3],
+}
+
+/// Что помещается в верхнюю полосу.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Fit {
+    /// Счётчики со значками вместо подписей.
+    compact: bool,
+    /// Сколько надписей справа показать: сортировка, время, версия — в этом порядке.
+    shown: usize,
+}
+
+/// Поля и промежутки полосы: как в разметке (`padding` 12 + 12, `spacing` 8).
+const HEADER_PADDING: f32 = 24.0;
+const HEADER_SPACING: f32 = 8.0;
+
+/// Решает, что поместится в полосу окна шириной `width`. Счётчики важнее всего:
+/// сначала справа налево уходят версия, время и сортировка, а если тесно и без них,
+/// подписи счётчиков сжимаются до значков.
+fn header_fit(width: f32, header: &Header) -> Fit {
+    // Части полосы: «disp», счётчики, растяжка и показанные надписи справа.
+    let need = |badges: f32, shown: usize| {
+        let right: f32 = header.right[..shown].iter().sum();
+        HEADER_PADDING + header.title + badges + right + HEADER_SPACING * (2 + shown) as f32
+    };
+    for compact in [false, true] {
+        let badges = if compact { header.compact } else { header.badges };
+        if let Some(shown) = (0..=3).rev().find(|&shown| need(badges, shown) <= width) {
+            return Fit { compact, shown };
+        }
+    }
+    Fit {
+        compact: true,
+        shown: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Полоса, где «disp» — 35, счётчики — 300 (со значками — 150), справа — 90, 50, 80.
+    fn header() -> Header {
+        Header {
+            title: 35.0,
+            badges: 300.0,
+            compact: 150.0,
+            right: [90.0, 50.0, 80.0],
+        }
+    }
+
+    #[test]
+    fn counters_outlive_everything_else_in_the_header() {
+        let fit = |width| header_fit(width, &header());
+        // Всё: 24 + 35 + 300 + 220 + 8 × 5 = 619.
+        assert_eq!(fit(619.0), Fit { compact: false, shown: 3 });
+        // Уходят версия, время, сортировка.
+        assert_eq!(fit(618.0), Fit { compact: false, shown: 2 });
+        assert_eq!(fit(500.0), Fit { compact: false, shown: 1 });
+        assert_eq!(fit(400.0), Fit { compact: false, shown: 0 });
+        // Подписи не помещаются и без надписей справа (24 + 35 + 300 + 16 = 375): значки,
+        // и рядом снова есть место для сортировки (24 + 35 + 150 + 90 + 24 = 323).
+        assert_eq!(fit(374.0), Fit { compact: true, shown: 1 });
+        assert_eq!(fit(240.0), Fit { compact: true, shown: 0 });
+        assert_eq!(fit(100.0), Fit { compact: true, shown: 0 });
+    }
 }
