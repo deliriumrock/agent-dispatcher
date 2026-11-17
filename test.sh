@@ -138,6 +138,8 @@ has "таблица по-английски" "waiting: 1 · working: 0" "$(DISP_
 has "таблица по-украински" "ЗАВДАННЯ" "$(DISP_LANG=uk "$DISP" ls)"
 printf 'DISP_LANG=uk\n' >"$T/env-uk"
 has "язык из файла настроек" "мова: uk" "$(DISP_LANG= DISP_CONFIG="$T/env-uk" "$DISP" doctor)"
+printf 'DISP_LANG=uk\nDISP_LANG=\nDISP_LANG=en\n' >"$T/env-twice"
+has "ключ задан в файле дважды — действует последняя строка" "language: en" "$(DISP_LANG= DISP_CONFIG="$T/env-twice" "$DISP" doctor)"
 has "язык системы" "ЗАВДАННЯ" "$(DISP_LANG= LANGUAGE= LC_ALL= LC_MESSAGES= LANG=uk_UA.UTF-8 "$DISP" ls)"
 has "чужой язык системы — английский" "TASK" "$(DISP_LANG= LANGUAGE= LC_ALL= LC_MESSAGES= LANG=de_DE.UTF-8 "$DISP" ls)"
 check "первой идёт ждущая сессия" "0c0de1" "$(echo "$tbl" | sed -n 3p | awk '{print $1}')"

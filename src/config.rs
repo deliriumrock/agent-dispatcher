@@ -119,6 +119,8 @@ impl Paths {
 }
 
 /// Настройки: переменные окружения, а для неустановленных — значения из файла.
+/// В файле, как у оболочки, при повторе ключа действует последняя строка, а пустое
+/// значение — то же, что ключа нет.
 #[derive(Clone, Debug, Default)]
 pub struct Settings {
     values: HashMap<&'static str, String>,
@@ -127,23 +129,13 @@ pub struct Settings {
 impl Settings {
     /// Читает настройки. Окружение важнее файла; в файле учитываются только известные ключи.
     pub fn load(conf_file: &Path) -> Self {
-        let mut values = HashMap::new();
+        let mut values = fs::read(conf_file)
+            .map(|bytes| file_values(&String::from_utf8_lossy(&bytes)))
+            .unwrap_or_default();
+        // Окружение важнее файла.
         for key in CONF_KEYS {
             if let Some(value) = env_nonempty(key) {
                 values.insert(key, value);
-            }
-        }
-        if let Ok(bytes) = fs::read(conf_file) {
-            for line in String::from_utf8_lossy(&bytes).lines() {
-                let Some((name, value)) = parse_line(line) else {
-                    continue;
-                };
-                if value.is_empty() {
-                    continue;
-                }
-                if let Some(key) = CONF_KEYS.iter().copied().find(|known| *known == name) {
-                    values.entry(key).or_insert(value);
-                }
             }
         }
         Settings { values }
@@ -181,6 +173,22 @@ fn strip_pair(text: &str, quote: char) -> &str {
     text.strip_suffix(quote).unwrap_or(text)
 }
 
+/// Известные ключи из текста файла настроек. Как у оболочки: при повторе ключа
+/// действует последняя строка, пустое значение — то же, что ключа нет.
+fn file_values(text: &str) -> HashMap<&'static str, String> {
+    let mut values = HashMap::new();
+    for line in text.lines() {
+        let Some((name, value)) = parse_line(line) else {
+            continue;
+        };
+        if let Some(key) = CONF_KEYS.iter().copied().find(|known| *known == name) {
+            values.insert(key, value);
+        }
+    }
+    values.retain(|_, value: &mut String| !value.is_empty());
+    values
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,5 +208,16 @@ mod tests {
         let (name, value) = parse_line("EVIL=$(touch /tmp/pwned)").unwrap_or_default();
         assert_eq!(name, "EVIL");
         assert_eq!(value, "$(touch /tmp/pwned)");
+    }
+
+    #[test]
+    fn the_last_line_of_a_repeated_key_wins() {
+        let text = "DISP_LANG=uk\nDISP_LANG=\nDISP_LANG=en\nDISP_STALE_MIN=5\nUNKNOWN=1\n";
+        let values = file_values(text);
+        assert_eq!(values.get("DISP_LANG").map(String::as_str), Some("en"));
+        assert_eq!(values.get("DISP_STALE_MIN").map(String::as_str), Some("5"));
+        assert_eq!(values.len(), 2);
+        // Последнее присваивание пустое — ключа нет, как у оболочки.
+        assert!(!file_values("DISP_LANG=uk\nDISP_LANG=\n").contains_key("DISP_LANG"));
     }
 }
