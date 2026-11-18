@@ -16,7 +16,7 @@ default-members = ["."]
 [workspace.package]
 # Третья цифра — номер сборки, показывается тремя знаками: 0.8.1 — это «0.8.001».
 # Повышается командой `make bump` перед каждой сборкой, которая уходит в работу.
-version = "0.8.17"
+version = "0.8.18"
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

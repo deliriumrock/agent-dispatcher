@@ -100,6 +100,14 @@ ev codex "{\"session_id\":\"$CB\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"U
 ev codex "{\"session_id\":\"$CB\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"PermissionRequest\",\"tool_name\":\"Bash\"}" "${V[@]}"
 check "Codex: waiting" "waiting" "$(field "codex-$CB" .status)"
 check "Codex: где = vscode" "vscode" "$(field "codex-$CB" .where)"
+# Codex из VS Code: хуки исполняет сервер расширения, окна терминала у сессии нет. Место —
+# vscode, даже если редактор запущен из панели zellij и её переменные достались серверу.
+EXT="$T/vscode/extensions/openai.chatgpt-9.9.9/bin/codex" VS="$(mktemp -d)"
+printf '%s' "{\"session_id\":\"$CB\",\"cwd\":\"$T/nbx-142\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Сделай ревью\"}" |
+  env "${Z[@]}" DISP_STATE_DIR="$VS" \
+    bash -c 'exec -a "$0" bash -c "\"\$0\" hook codex; true" "$1" app-server' "$EXT" "$DISP"
+check "Codex из VS Code (хук под сервером расширения): где = vscode" "vscode" \
+  "$(DISP_STATE_DIR="$VS" field "codex-$CB" .where)"
 
 echo "== 3. Codex: третья сессия, другая задача, короткий ход"
 export DISP_NOW=2200
@@ -375,5 +383,5 @@ check "строку закрытого агента убирают без -f" "t
 
 echo
 echo "итого: ok=$pass fail=$fail"
-rm -rf "$T"
+rm -rf "$T" "$VS"
 [ "$fail" -eq 0 ]
