@@ -31,7 +31,7 @@ const JOURNAL_KEEP: usize = 5000;
 
 /// `disp ls [-a] [--json]`: таблица незакрытых сессий.
 pub fn ls(args: &[String]) -> u8 {
-    // Сначала — что изменилось у агентов в контейнерах: хуков у них нет.
+    // Сначала — что изменилось без хуков: агенты в контейнерах, сессии, ушедшие в фон.
     observe::sync(&Store::new(Paths::from_env()));
     let board = Board::load();
     let mut all = false;

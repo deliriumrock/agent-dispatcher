@@ -17,6 +17,7 @@ pub mod detect;
 pub mod error;
 #[cfg(test)]
 mod fakeproc;
+pub mod handover;
 pub mod hook;
 pub mod i18n;
 pub mod install;

@@ -217,6 +217,10 @@ pub struct Session {
     /// Сколько фоновых задач осталось после остановки хода.
     #[serde(default, deserialize_with = "nullable")]
     pub bg: i64,
+    /// Транскрипт сессии, как его назвал агент (`transcript_path`). По концу транскрипта
+    /// Claude Code видно, что разговор продолжен в другой сессии (`crate::handover`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<String>,
     /// Процесс агента, если хук смог его узнать: по нему видно, жив ли агент, когда
     /// сессия давно молчит.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -233,22 +233,27 @@ fn ancestor_in(proc: &Path, pid: u32, wanted: impl Fn(&[String]) -> bool) -> Opt
 /// Когда сессию отправляют в фон, Claude Code продолжает разговор в новой сессии, а в
 /// транскрипт прежней дописывает последней записью
 /// `{"type":"continued-in","continuedInSessionId":"<новая>"}`. Ни Stop, ни SessionEnd
-/// прежняя сессия при этом не присылает.
+/// прежняя сессия при этом не присылает. Если после этой записи разговор в прежней
+/// сессии шёл дальше (есть запись `user` или `assistant`), он в ней и продолжается.
 pub fn claude_continued_in(transcript: &Path) -> Option<String> {
     let (lines, _) = crate::observe::tail_lines(transcript, TRANSCRIPT_TAIL);
-    lines
-        .iter()
-        .rev()
-        .filter(|line| line.contains("\"continued-in\""))
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .find(|record| record.get("type").and_then(Value::as_str) == Some("continued-in"))
-        .and_then(|record| {
-            record
-                .get("continuedInSessionId")
-                .and_then(Value::as_str)
-                .filter(|sid| !sid.is_empty())
-                .map(str::to_string)
-        })
+    for line in lines.iter().rev() {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        match record.get("type").and_then(Value::as_str) {
+            Some("continued-in") => {
+                return record
+                    .get("continuedInSessionId")
+                    .and_then(Value::as_str)
+                    .filter(|sid| !sid.is_empty())
+                    .map(str::to_string);
+            }
+            Some("user" | "assistant") => return None,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Программа из расширения Codex для редактора: `~/.vscode/extensions/openai.chatgpt-…`.
@@ -1029,6 +1034,16 @@ mod tests {
             claude_continued_in(&transcript).as_deref(),
             Some("f2331f64")
         );
+        // Служебные записи после передачи ей не мешают, а новый ход в прежней сессии — да.
+        let cost = "{\"type\":\"cost-state\",\"total\":1}\n";
+        assert!(fs::write(&transcript, format!("{head}{last}{cost}")).is_ok());
+        assert_eq!(
+            claude_continued_in(&transcript).as_deref(),
+            Some("f2331f64")
+        );
+        let again = "{\"type\":\"user\",\"message\":\"ещё\"}\n";
+        assert!(fs::write(&transcript, format!("{head}{last}{again}")).is_ok());
+        assert_eq!(claude_continued_in(&transcript), None);
         let _ = fs::remove_file(&transcript);
         assert_eq!(claude_continued_in(&transcript), None);
     }
