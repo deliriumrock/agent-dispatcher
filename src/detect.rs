@@ -24,6 +24,9 @@ const ZELLIJ_TIMEOUT: Duration = Duration::from_secs(2);
 const CODEX_INDEX_WINDOW: u64 = 1024 * 1024;
 /// Сколько байт с начала транскрипта просматривать в поисках каталога запуска.
 const TRANSCRIPT_HEAD: u64 = 256 * 1024;
+/// Сколько байт с конца транскрипта просматривать в поисках записи о продолжении разговора:
+/// она последняя, за ней ничего не пишется.
+const TRANSCRIPT_TAIL: u64 = 16 * 1024;
 /// Служебные каталоги внутри проекта: сами проектом не считаются.
 const SERVICE_DIRS: [&str; 18] = [
     "src",
@@ -181,25 +184,71 @@ pub fn codex_host() -> CodexHost {
 }
 
 fn codex_host_in(proc: &Path, pid: u32) -> CodexHost {
+    let server = ancestor_in(proc, pid, |args| {
+        is_codex(args) && args.iter().any(|arg| arg == "app-server")
+    });
+    let Some(args) = server else {
+        return CodexHost::Agent;
+    };
+    // Программа — тот из первых двух аргументов, что `codex` (см. `is_codex`).
+    let program = args.iter().take(2).find(|arg| base_name(arg) == "codex");
+    if program.is_some_and(|program| in_editor_extension(program)) {
+        CodexHost::Editor
+    } else {
+        CodexHost::Daemon
+    }
+}
+
+/// Запущен ли хук запасным процессом Claude Code (`claude bg-spare --bg-spare <сокет>`).
+///
+/// Такие процессы Claude Code держит наготове для фоновых сессий. Запасной процесс
+/// сообщает о начале своей сессии сразу при запуске, а работу может так и не получить:
+/// тогда он завершается молча, и в списке осталась бы пустая сессия.
+pub fn under_claude_spare() -> bool {
+    ancestor_in(Path::new("/proc"), std::process::id(), is_claude_spare).is_some()
+}
+
+/// Запасной процесс Claude Code: у него в командной строке есть `--bg-spare`.
+fn is_claude_spare(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--bg-spare")
+}
+
+/// Аргументы ближайшего предка процесса `pid`, для которого `wanted` верно. Хук
+/// запускается через оболочку, поэтому смотрим несколько предков.
+fn ancestor_in(proc: &Path, pid: u32, wanted: impl Fn(&[String]) -> bool) -> Option<Vec<String>> {
     let mut pid = pid;
-    // Хук запускается через оболочку, поэтому смотрим несколько предков.
     for _ in 0..6 {
-        let Some(parent) = parent_pid(proc, pid).filter(|parent| *parent > 1) else {
-            return CodexHost::Agent;
-        };
+        let parent = parent_pid(proc, pid).filter(|parent| *parent > 1)?;
         let args = cmdline(proc, parent);
-        if is_codex(&args) && args.iter().any(|arg| arg == "app-server") {
-            // Программа — тот из первых двух аргументов, что `codex` (см. `is_codex`).
-            let program = args.iter().take(2).find(|arg| base_name(arg) == "codex");
-            return if program.is_some_and(|program| in_editor_extension(program)) {
-                CodexHost::Editor
-            } else {
-                CodexHost::Daemon
-            };
+        if wanted(&args) {
+            return Some(args);
         }
         pid = parent;
     }
-    CodexHost::Agent
+    None
+}
+
+/// Сессия, в которой продолжен разговор из транскрипта Claude Code `transcript`.
+///
+/// Когда сессию отправляют в фон, Claude Code продолжает разговор в новой сессии, а в
+/// транскрипт прежней дописывает последней записью
+/// `{"type":"continued-in","continuedInSessionId":"<новая>"}`. Ни Stop, ни SessionEnd
+/// прежняя сессия при этом не присылает.
+pub fn claude_continued_in(transcript: &Path) -> Option<String> {
+    let (lines, _) = crate::observe::tail_lines(transcript, TRANSCRIPT_TAIL);
+    lines
+        .iter()
+        .rev()
+        .filter(|line| line.contains("\"continued-in\""))
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|record| record.get("type").and_then(Value::as_str) == Some("continued-in"))
+        .and_then(|record| {
+            record
+                .get("continuedInSessionId")
+                .and_then(Value::as_str)
+                .filter(|sid| !sid.is_empty())
+                .map(str::to_string)
+        })
 }
 
 /// Программа из расширения Codex для редактора: `~/.vscode/extensions/openai.chatgpt-…`.
@@ -940,6 +989,48 @@ mod tests {
             codex_place_in(&proc.root, "/w/other", Some("zellij:dev#9")),
             None
         );
+    }
+
+    #[test]
+    fn hook_from_a_claude_spare_is_recognised() {
+        let proc = FakeProc::new("spare");
+        let sock = "/tmp/cc-daemon-1000/ab/spare/82b1.claim.sock";
+        proc.add(
+            100,
+            1,
+            &["claude", "bg-spare", "--bg-spare", sock],
+            "/w",
+            &[],
+        );
+        proc.add(200, 100, &["sh", "-c", "disp hook claude"], "/w", &[]);
+        proc.add(300, 200, &["disp", "hook", "claude"], "/w", &[]);
+        proc.add(400, 1, &["claude", "--resume"], "/w", &[]);
+        proc.add(500, 400, &["disp", "hook", "claude"], "/w", &[]);
+        assert!(ancestor_in(&proc.root, 300, is_claude_spare).is_some());
+        assert!(ancestor_in(&proc.root, 500, is_claude_spare).is_none());
+    }
+
+    #[test]
+    fn continued_conversation_is_read_from_the_end_of_the_transcript() {
+        let transcript =
+            std::env::temp_dir().join(format!("disp-continued-{}", std::process::id()));
+        let head = concat!(
+            "{\"type\":\"user\",\"cwd\":\"/w\",\"message\":\"continued-in\"}\n",
+            "{\"type\":\"system\",\"content\":\"Backgrounding after the current tool finishes…\"}\n",
+        );
+        assert!(fs::write(&transcript, head).is_ok());
+        assert_eq!(claude_continued_in(&transcript), None);
+        let last = concat!(
+            "{\"type\":\"continued-in\",\"timestamp\":\"2026-11-18T16:35:42.899Z\",",
+            "\"sessionId\":\"cf2731ff\",\"continuedInSessionId\":\"f2331f64\"}\n",
+        );
+        assert!(fs::write(&transcript, format!("{head}{last}")).is_ok());
+        assert_eq!(
+            claude_continued_in(&transcript).as_deref(),
+            Some("f2331f64")
+        );
+        let _ = fs::remove_file(&transcript);
+        assert_eq!(claude_continued_in(&transcript), None);
     }
 
     #[test]

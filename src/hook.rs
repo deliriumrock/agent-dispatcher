@@ -8,7 +8,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::parent_id;
 use std::panic::{self, AssertUnwindSafe};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::Local;
 use serde_json::{Map, Value};
@@ -454,6 +454,11 @@ fn handle(store: &Store, agent_arg: &str, event_arg: &str, raw: &[u8]) -> Result
     let Some(action) = Action::from_event(&event) else {
         return Ok(());
     };
+    // Запасной процесс Claude Code сообщает о начале сессии, ещё не получив работы, и может
+    // так её и не получить. Строка такой сессии появится с первым настоящим событием.
+    if agent == "claude" && action == Action::Start && detect::under_claude_spare() {
+        return Ok(());
+    }
 
     let sid = match sanitize(&text_of(
         payload,
@@ -474,6 +479,13 @@ fn handle(store: &Store, agent_arg: &str, event_arg: &str, raw: &[u8]) -> Result
     // чтобы решить, что стоит определять заново.
     let before = store::read_session(&file);
     let transcript = text_of(payload, &["transcript_path"]);
+    // Первое событие сессии Claude Code: не продолжает ли она разговор сессии, ушедшей
+    // в фон. Прежнюю сессию закрываем ниже, под блокировкой.
+    let handed_over = if agent == "claude" && before.is_none() {
+        continued_sessions(store, &sid, &transcript)
+    } else {
+        Vec::new()
+    };
 
     // Задача определяется по каталогу, где агент запущен, а не по текущему: иначе она
     // менялась бы всякий раз, когда агент переходит в другой каталог. Каталог запуска
@@ -582,6 +594,11 @@ fn handle(store: &Store, agent_arg: &str, event_arg: &str, raw: &[u8]) -> Result
     let old = store::read_session(&file);
     let outcome = step(old.as_ref(), payload, action, &ctx);
     store::write_session(&file, &outcome.state)?;
+    for prev_file in &handed_over {
+        if let Some(prev) = store::read_session(prev_file).filter(|prev| !prev.ended) {
+            store::write_session(prev_file, &hand_over(prev, ctx.now))?;
+        }
+    }
     if let Some(event) = &outcome.event {
         store.append_event(event)?;
     }
@@ -594,6 +611,46 @@ fn handle(store: &Store, agent_arg: &str, event_arg: &str, raw: &[u8]) -> Result
         label_pane(action, old.as_ref(), &outcome.state);
     }
     Ok(())
+}
+
+/// Открытые сессии Claude Code, разговор которых продолжен в сессии `sid`: в конце их
+/// транскриптов стоит запись `continued-in` с этим id (см. `detect::claude_continued_in`).
+/// Их транскрипты ищутся рядом с транскриптом новой сессии: Claude Code кладёт оба в
+/// каталог проекта, где разговор начат.
+fn continued_sessions(store: &Store, sid: &str, transcript: &str) -> Vec<PathBuf> {
+    let Some(dir) = Path::new(transcript)
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+    else {
+        return Vec::new();
+    };
+    store
+        .all()
+        .into_iter()
+        .filter(|(_, session)| {
+            session.agent == "claude"
+                && session.session_id != sid
+                && !session.ended
+                && !session.accepted
+                && session.container.is_none()
+        })
+        .filter(|(_, session)| {
+            let previous = dir.join(format!("{}.jsonl", session.session_id));
+            detect::claude_continued_in(&previous).as_deref() == Some(sid)
+        })
+        .map(|(file, _)| file)
+        .collect()
+}
+
+/// Прежняя сессия, разговор которой продолжен в другой. Её закрывают и убирают из
+/// списка: та же работа идёт дальше в строке новой сессии.
+fn hand_over(mut session: Session, now: i64) -> Session {
+    session.ended = true;
+    session.end_reason = Some("continued".to_string());
+    session.accepted = true;
+    session.accepted_at = Some(now);
+    session.updated = now;
+    session
 }
 
 /// Держит подпись панели в согласии с сессией: ставит её на границах хода и когда
@@ -668,6 +725,21 @@ mod tests {
         let empty = Map::new();
         let action = Action::from_event(event).unwrap_or(Action::Start);
         step(old, payload.as_object().unwrap_or(&empty), action, ctx)
+    }
+
+    #[test]
+    fn handed_over_session_leaves_the_list() {
+        let working = apply(
+            None,
+            "UserPromptSubmit",
+            json!({"prompt": "поправь иконку"}),
+            &ctx(1000),
+        )
+        .state;
+        let gone = hand_over(working, 1100);
+        assert!(gone.ended && gone.accepted);
+        assert_eq!(gone.end_reason.as_deref(), Some("continued"));
+        assert_eq!((gone.accepted_at, gone.updated), (Some(1100), 1100));
     }
 
     #[test]

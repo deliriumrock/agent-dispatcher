@@ -560,7 +560,7 @@ fn event_kind(line: &str) -> Option<String> {
 
 /// Строки из последних `bytes` байт файла, без первой неполной; и прочитан ли файл
 /// целиком.
-fn tail_lines(path: &Path, bytes: u64) -> (Vec<String>, bool) {
+pub(crate) fn tail_lines(path: &Path, bytes: u64) -> (Vec<String>, bool) {
     let Ok(mut file) = File::open(path) else {
         return (Vec::new(), true);
     };
