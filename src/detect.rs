@@ -160,29 +160,61 @@ fn transcript_first_cwd(path: &Path) -> Option<String> {
         })
 }
 
-/// Запущен ли хук фоновым процессом Codex (`codex app-server`), а не самим агентом.
-///
-/// Codex 0.169 исполняет хуки в этом процессе, а он один на все сессии и запущен когда-то
-/// из какой-то одной панели. Переменные окружения хука — его, и по ним нельзя судить,
-/// где идёт сессия: все сессии Codex оказались бы в той первой панели.
-pub fn under_codex_daemon() -> bool {
-    under_codex_daemon_in(Path::new("/proc"), std::process::id())
+/// Какой процесс Codex исполняет хук.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodexHost {
+    /// Сам агент, или неизвестно какой: место — по окружению хука.
+    Agent,
+    /// Общий фоновый процесс `codex app-server`. Codex 0.169 исполняет хуки в нём, а он
+    /// один на все сессии и запущен когда-то из какой-то одной панели. Переменные
+    /// окружения хука — его, и по ним нельзя судить, где идёт сессия: все сессии Codex
+    /// оказались бы в той первой панели. Место ищется по процессу интерфейса (`codex_place`).
+    Daemon,
+    /// Сервер расширения Codex в VS Code (и в его ветвях): у такой сессии нет окна
+    /// терминала, она идёт в редакторе.
+    Editor,
 }
 
-fn under_codex_daemon_in(proc: &Path, pid: u32) -> bool {
+/// Какой процесс Codex исполняет этот хук: смотрит предков в `/proc`.
+pub fn codex_host() -> CodexHost {
+    codex_host_in(Path::new("/proc"), std::process::id())
+}
+
+fn codex_host_in(proc: &Path, pid: u32) -> CodexHost {
     let mut pid = pid;
     // Хук запускается через оболочку, поэтому смотрим несколько предков.
     for _ in 0..6 {
         let Some(parent) = parent_pid(proc, pid).filter(|parent| *parent > 1) else {
-            return false;
+            return CodexHost::Agent;
         };
         let args = cmdline(proc, parent);
         if is_codex(&args) && args.iter().any(|arg| arg == "app-server") {
-            return true;
+            // Программа — тот из первых двух аргументов, что `codex` (см. `is_codex`).
+            let program = args.iter().take(2).find(|arg| base_name(arg) == "codex");
+            return if program.is_some_and(|program| in_editor_extension(program)) {
+                CodexHost::Editor
+            } else {
+                CodexHost::Daemon
+            };
         }
         pid = parent;
     }
-    false
+    CodexHost::Agent
+}
+
+/// Программа из расширения Codex для редактора: `~/.vscode/extensions/openai.chatgpt-…`.
+/// Так же лежит она у `~/.vscode-server` и у ветвей VS Code (`~/.cursor/extensions/…`).
+fn in_editor_extension(program: &str) -> bool {
+    let parts: Vec<&std::ffi::OsStr> = Path::new(program)
+        .components()
+        .map(|part| part.as_os_str())
+        .collect();
+    parts.windows(2).any(|pair| {
+        pair[0] == "extensions"
+            && pair[1]
+                .to_str()
+                .is_some_and(|name| name.starts_with("openai.chatgpt"))
+    })
 }
 
 /// Где идёт сессия Codex с рабочим каталогом `cwd`, если хук запущен его фоновым
@@ -816,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn hook_under_the_codex_daemon_is_recognised() {
+    fn hook_host_tells_the_codex_daemon_from_the_editor() {
         let proc = FakeProc::new("daemon");
         let daemon = "/home/u/.codex/packages/app-server-daemon/bin/codex";
         proc.add(
@@ -831,8 +863,31 @@ mod tests {
         // Хук Claude Code: родитель — сам агент.
         proc.add(400, 1, &["claude"], "/w", &[]);
         proc.add(500, 400, &["disp", "hook", "claude"], "/w", &[]);
-        assert!(under_codex_daemon_in(&proc.root, 300));
-        assert!(!under_codex_daemon_in(&proc.root, 500));
+        // Сервер расширения VS Code: у него своя копия Codex в каталоге расширения.
+        let editor = "/home/u/.vscode/extensions/openai.chatgpt-26.1111.21308-linux-x64/bin/linux-x86_64/codex";
+        proc.add(600, 1, &[editor, "app-server"], "/home/u", &[]);
+        proc.add(700, 600, &["sh", "-c", "disp hook codex"], "/w", &[]);
+        proc.add(800, 700, &["disp", "hook", "codex"], "/w", &[]);
+        assert_eq!(codex_host_in(&proc.root, 300), CodexHost::Daemon);
+        assert_eq!(codex_host_in(&proc.root, 500), CodexHost::Agent);
+        assert_eq!(codex_host_in(&proc.root, 800), CodexHost::Editor);
+    }
+
+    #[test]
+    fn editor_extension_is_found_by_its_directory() {
+        assert!(in_editor_extension(
+            "/home/vscode/.vscode-server/extensions/openai.chatgpt-26.1111.21308-linux-x64/bin/linux-x86_64/codex"
+        ));
+        assert!(in_editor_extension(
+            "/home/u/.cursor/extensions/openai.chatgpt-1.0.0/bin/codex"
+        ));
+        assert!(!in_editor_extension(
+            "/home/u/.codex/packages/app-server-daemon/bin/codex"
+        ));
+        assert!(!in_editor_extension(
+            "/home/u/.npm-global/lib/node_modules/@openai/codex/bin/codex"
+        ));
+        assert!(!in_editor_extension("/home/u/extensions/codex"));
     }
 
     #[test]
