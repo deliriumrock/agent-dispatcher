@@ -516,7 +516,7 @@ struct Child {
     started: i64,
 }
 
-/// Дочерние агенты сессий Codex `parents` (номер сессии → с какого момента смотреть) по
+/// Дочерние агенты сессий Codex `parents` (номер сессии → начало её хода) по
 /// журналам в каталоге `sessions`. Первая строка журнала агента ссылается на родительскую
 /// сессию: `source.subagent.thread_spawn.parent_thread_id`. Служебные потоки Codex
 /// (проверки Guardian) агентами сессии не считаются. Агент работает, пока в его журнале
@@ -528,7 +528,9 @@ pub(crate) fn codex_children(
     stale: i64,
 ) -> HashMap<String, Vec<SubAgent>> {
     let mut out: HashMap<String, Vec<SubAgent>> = HashMap::new();
-    let Some(since) = parents.values().min().copied() else {
+    // Работающий агент мог начаться и до нынешнего хода родителя: смотрим и всё окно,
+    // в котором он ещё может считаться работающим.
+    let Some(since) = parents.values().min().map(|&turn| turn.min(now - stale)) else {
         return out;
     };
     for rollout in rollouts(sessions, since) {

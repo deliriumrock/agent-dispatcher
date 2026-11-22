@@ -251,6 +251,11 @@ pub struct Session {
     /// сессия давно молчит.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<AgentProcess>,
+    /// Когда Claude Code закончил ход, ожидая своих фоновых агентов: ход ещё не окончен,
+    /// его продолжит сам Claude Code. Если агенты закончили, а он молчит, ход завершает
+    /// сверка (`crate::agents`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaiting: Option<i64>,
     /// Агенты, которых сессия запустила в текущем ходе, и те, что ещё работают.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<SubAgent>,

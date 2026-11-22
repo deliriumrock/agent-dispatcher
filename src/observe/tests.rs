@@ -613,4 +613,16 @@ fn codex_children_are_found_by_their_parent() {
         ]
     );
     assert_eq!(found.len(), 1);
+
+    // Родитель начал новый ход, а агент с прошлого хода ещё работает и пока молчит.
+    let later = HashMap::from([("p1".to_string(), now + 10)]);
+    let found = codex_children(&dir.0.join("sessions"), &later, now + 20, 1800);
+    let running: Vec<&str> = found
+        .get("p1")
+        .into_iter()
+        .flatten()
+        .filter(|agent| agent.running)
+        .map(|agent| agent.kind.as_str())
+        .collect();
+    assert_eq!(running, ["Newton"]);
 }
