@@ -14,7 +14,7 @@ use chrono::{DateTime, Local};
 use serde_json::Value;
 
 use crate::VERSION;
-use crate::board::{self, Accepted, Board, Counts, Row, or_question, status_name};
+use crate::board::{self, Accepted, Board, Counts, Row, agent_text, or_question, status_name};
 use crate::config::{Paths, env_nonempty};
 use crate::detect::{self, which};
 use crate::model::Status;
@@ -113,6 +113,15 @@ fn table(board: &Board, cols: usize, all: bool, color: bool) -> String {
             },
         );
         lines.push(paint(&line, row.view.color(), color));
+        // Работающие агенты сессии — строками под ней, от колонки статуса.
+        for agent in row.agent_lines(board.now) {
+            let agent = format!(
+                "{} └ {}",
+                " ".repeat(6),
+                clip(&agent, cols.saturating_sub(10).max(20))
+            );
+            lines.push(paint(&agent, "2", color));
+        }
     }
     lines.join("\n")
 }
@@ -183,6 +192,8 @@ pub fn show(args: &[String]) -> u8 {
         ));
         return 2;
     };
+    // Агенты сессии и передачу в фон видно только сверкой, как в `ls`.
+    observe::sync(&Store::new(Paths::from_env()));
     let board = Board::load();
     let found: Vec<Row> = board
         .rows()
@@ -201,14 +212,14 @@ pub fn show(args: &[String]) -> u8 {
     }
     let mut out = String::new();
     for row in &found {
-        out.push_str(&details(row));
+        out.push_str(&details(row, board.now));
     }
     emit(&out);
     0
 }
 
 /// Текст подробностей одной сессии.
-fn details(row: &Row) -> String {
+fn details(row: &Row, now: i64) -> String {
     let s = &row.session;
     let mut lines = vec![format!("{}  {}  [{}]", row.sid, s.label(), s.agent)];
     // Поле подробностей: название и значение, значения выровнены.
@@ -257,7 +268,7 @@ fn details(row: &Row) -> String {
     if let Some(done_at) = s.done_at {
         lines.push(field(t!("turn ended", "ход окончен", "хід завершено"), &utc(done_at)));
     }
-    if s.subagents > 0 {
+    if s.subagents > 0 && s.agents.is_empty() {
         let count = s.subagents;
         lines.push(tr!(
             "  subagents running: {count}",
@@ -281,6 +292,12 @@ fn details(row: &Row) -> String {
                 if task.d { "x" } else { " " },
                 task.s
             ));
+        }
+    }
+    if !s.agents.is_empty() {
+        lines.push(tr!("  agents:", "  агенты:", "  агенти:"));
+        for agent in &s.agents {
+            lines.push(format!("    {}", agent_text(agent, now)));
         }
     }
     lines.push(String::new());

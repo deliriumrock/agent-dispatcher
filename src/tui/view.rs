@@ -631,26 +631,33 @@ fn draw_list(frame: &mut Frame, full: Rect, app: &mut App) {
             .buffer_mut()
             .set_string(area.x + lane.x as u16, header.y, axis, dim());
     }
+    // Под сессией — строки её работающих агентов, поэтому высота строк списка разная.
     let row_height = shape.row_height();
-    let visible = usize::from((area.bottom().saturating_sub(top) / row_height).max(1));
+    let agents: Vec<Vec<String>> = app
+        .rows
+        .iter()
+        .map(|row| row.agent_lines(app.now))
+        .collect();
+    let heights: Vec<u16> = agents
+        .iter()
+        .map(|lines| row_height + lines.len() as u16)
+        .collect();
+    let room = area.bottom().saturating_sub(top).max(1);
+    let (offset, visible) = scroll(&heights, app.selected, app.offset, room);
+    app.offset = offset;
     app.page = visible;
-    if app.selected < app.offset {
-        app.offset = app.selected;
-    }
-    if app.selected >= app.offset + visible {
-        app.offset = app.selected + 1 - visible;
-    }
-    app.offset = app.offset.min(app.rows.len().saturating_sub(visible));
 
     let buffer = frame.buffer_mut();
+    let mut y = top;
     let shown = app.rows.iter().enumerate().skip(app.offset).take(visible);
-    for (slot, (index, row)) in shown.enumerate() {
+    for (index, row) in shown {
         let spot = Rect {
-            y: top + slot as u16 * row_height,
-            height: row_height,
+            y,
+            height: heights[index],
             ..area
         }
         .intersection(area);
+        y += heights[index];
         if spot.height == 0 {
             continue;
         }
@@ -678,12 +685,32 @@ fn draw_list(frame: &mut Frame, full: Rect, app: &mut App) {
             buffer.set_string(full.x, spot.y, "▶", colour.add_modifier(Modifier::BOLD));
         }
         let mut lines = row_lines(shape, row, app.now, cells, lane.is_some());
-        // Лента занимает последнюю строку: у таблицы место после колонок, у карточки — вторую.
+        // Лента занимает последнюю строку сессии: у таблицы место после колонок, у
+        // карточки — вторую. Строки агентов идут после неё.
         let lane_line = lines.len().saturating_sub(1);
+        let own_lines = lines.len();
+        let indent = match shape {
+            Shape::Table(columns) if columns.id => 7,
+            _ => 0,
+        };
+        lines.extend(
+            agents[index]
+                .iter()
+                .map(|agent| format!("{}└ {agent}", " ".repeat(indent))),
+        );
         if lane.is_some() && shape == Shape::Cards {
             lines[lane_line].clear();
         }
         for (line, text) in lines.iter().enumerate().take(usize::from(spot.height)) {
+            if line >= own_lines {
+                let strip = Rect {
+                    y: spot.y + line as u16,
+                    height: 1,
+                    ..spot
+                };
+                buffer.set_stringn(strip.x, strip.y, text, cells, dim());
+                continue;
+            }
             let style = match (alarm, selected) {
                 (Some(alarm), true) => alarm.add_modifier(Modifier::BOLD),
                 (Some(alarm), false) => alarm,
@@ -726,6 +753,39 @@ fn draw_list(frame: &mut Frame, full: Rect, app: &mut App) {
             }
         }
     }
+}
+
+/// Прокрутка списка со строками разной высоты `heights` на `room` строк экрана: первая
+/// показанная строка и сколько строк помещается начиная с неё. Выбранная строка
+/// `selected` всегда видна; если внизу остаётся место, список подтягивается вверх.
+fn scroll(heights: &[u16], selected: usize, offset: usize, room: u16) -> (usize, usize) {
+    if heights.is_empty() {
+        return (0, 1);
+    }
+    let selected = selected.min(heights.len() - 1);
+    let fits = |from: usize, to: usize| -> bool {
+        heights[from..=to]
+            .iter()
+            .map(|&h| u32::from(h))
+            .sum::<u32>()
+            <= u32::from(room)
+    };
+    let mut offset = offset.min(selected);
+    while offset < selected && !fits(offset, selected) {
+        offset += 1;
+    }
+    while offset > 0 && fits(offset - 1, heights.len() - 1) {
+        offset -= 1;
+    }
+    let mut used = 0u32;
+    let visible = heights[offset..]
+        .iter()
+        .take_while(|&&h| {
+            used += u32::from(h);
+            used <= u32::from(room)
+        })
+        .count();
+    (offset, visible.max(1))
 }
 
 /// Строки подробностей выбранной сессии, уже разбитые по ширине.
@@ -1242,6 +1302,60 @@ mod tests {
             assert_eq!(lines[1], titles, "{lang:?}");
             assert!(lines[2].starts_with(first), "{lang:?}: {}", lines[2]);
         }
+    }
+
+    #[test]
+    fn running_agents_are_listed_under_their_session() {
+        use crate::model::SubAgent;
+        let agent = |id: &str, what: &str, running: bool| SubAgent {
+            id: id.to_string(),
+            kind: "general-purpose".to_string(),
+            what: what.to_string(),
+            background: true,
+            running,
+            started: 580,
+            updated: 990,
+        };
+        let mut app = app();
+        let mut rows = app.rows.clone();
+        let Some(working) = rows
+            .iter_mut()
+            .find(|row| row.session.task == "trading-system")
+        else {
+            panic!("нет работающей сессии");
+        };
+        working.session.agents = vec![
+            agent("a1", "Survey wiki", true),
+            agent("a2", "Find icons", false),
+            agent("a3", "Inventory widgets", true),
+        ];
+        app.set_rows(rows, 1000);
+        let lines = screen(&mut app, 110, 9);
+        let at = lines
+            .iter()
+            .position(|line| line.contains("trading-system"))
+            .unwrap_or_default();
+        assert_eq!(
+            lines[at + 1],
+            "         └ ● general-purpose: Survey wiki · 7м"
+        );
+        assert_eq!(
+            lines[at + 2],
+            "         └ ● general-purpose: Inventory widgets · 7м"
+        );
+    }
+
+    #[test]
+    fn scrolling_keeps_tall_rows_on_screen() {
+        // Пять строк, у третьей ещё три строки агентов, а на экране место для четырёх.
+        let heights = [1, 1, 4, 1, 1];
+        assert_eq!(scroll(&heights, 0, 0, 4), (0, 2));
+        assert_eq!(scroll(&heights, 2, 0, 4), (2, 1));
+        assert_eq!(scroll(&heights, 4, 2, 4), (3, 2));
+        // Выбор вернулся вверх; внизу место есть — список подтягивается.
+        assert_eq!(scroll(&heights, 3, 3, 7), (1, 4));
+        assert_eq!(scroll(&heights, 3, 3, 8), (0, 5));
+        assert_eq!(scroll(&[], 0, 5, 4), (0, 1));
     }
 
     #[test]

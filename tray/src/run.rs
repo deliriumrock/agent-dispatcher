@@ -161,7 +161,8 @@ impl App {
     /// Свежая модель значка по файлам.
     fn read(&mut self) -> Tray {
         self.seen = Some(self.stamp());
-        Tray::from_rows(&Board::load().visible(false))
+        let board = Board::load();
+        Tray::from_rows(&board.visible(false), board.now)
     }
 
     /// Отпечаток того, от чего зависит значок: файлы сессий и время с шагом `RECHECK_SEC`.

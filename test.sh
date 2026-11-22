@@ -7,6 +7,7 @@ export DISP_STATE_DIR="$T/state" DISP_CONFIG="$T/env" DISP_DESKTOP=0 DISP_COLOR=
 export DISP_PANE_TITLE=0   # настоящий zellij в тестах не опрашиваем; раздел 12 подставляет свой
 export DISP_CONTAINERS=0   # агенты в контейнерах этой машины в тестовый список не попадают
 export DISP_LANG=ru   # ожидания написаны по-русски; другие языки проверяет раздел 5
+export CODEX_HOME="$T/codex"   # дочерних агентов Codex ищем в тестовом каталоге, не в настоящем
 export XDG_STATE_HOME="$T/xdg"
 NOTES="$T/notes.log"
 cat >"$T/notify.sh" <<EOF
@@ -406,6 +407,74 @@ printf '%s\n' "{\"type\":\"continued-in\",\"sessionId\":\"$CP\",\"continuedInSes
 hasnt "запись о передаче появилась: прежней сессии в списке нет" "0b0a11" "$("$DISP" ls)"
 check "прежняя сессия закрыта и убрана из списка" "true/true/continued" "$(field "claude-$CP" '"\(.ended)/\(.accepted)/\(.end_reason)"')"
 has "фоновая сессия осталась" "0b0a12" "$("$DISP" ls)"
+
+echo "== 16. Агенты, которых запускает сессия"
+# Claude Code: на каждого субагента meta.json рядом с транскриптом. Агентам инструмента
+# Agent (у них есть toolUseId) по окончании ставится "finished".
+export DISP_NOW=22000
+CA2="abababab-7777-4777-8777-0000000a9e01"
+TA="$TR/$CA2/subagents"
+mkdir -p "$TA"
+printf '%s\n' "{\"type\":\"user\",\"cwd\":\"$T/site-31\"}" >"$TR/$CA2.jsonl"
+stop2() { # stop2 <DISP_NOW>: конец хода сессии CA2
+  DISP_NOW="$1" ev claude "{\"session_id\":\"$CA2\",\"cwd\":\"$T/site-31\",\"transcript_path\":\"$TR/$CA2.jsonl\",\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"Готово\"}" "${Z[@]}"
+}
+prompt2() { # prompt2 <DISP_NOW>: новый ход сессии CA2
+  DISP_NOW="$1" ev claude "{\"session_id\":\"$CA2\",\"cwd\":\"$T/site-31\",\"transcript_path\":\"$TR/$CA2.jsonl\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Опиши виджеты\"}" "${Z[@]}"
+}
+agent2() { # agent2 <id> <meta.json> <последняя запись журнала>
+  printf '%s' "$2" >"$TA/agent-$1.meta.json"
+  printf '%s\n%s\n' '{"type":"user"}' "$3" >"$TA/agent-$1.jsonl"
+}
+TOOLREC='{"type":"assistant","message":{"stop_reason":"tool_use"}}'
+ENDREC='{"type":"assistant","message":{"stop_reason":"end_turn"}}'
+prompt2 22000
+agent2 a1 '{"agentType":"general-purpose","description":"Survey wiki","requestShape":"background","toolUseId":"toolu_1"}' "$TOOLREC"
+before="$(wc -l <"$NOTES")"
+stop2 22300
+settle
+check "ход ждёт фонового агента: сессия работает" "working" "$(field "claude-$CA2" .status)"
+check "о конце хода, который ждёт агентов, не сообщаем" "$before" "$(wc -l <"$NOTES")"
+row="$("$DISP" ls)"
+has "агент виден строкой под сессией" "└ ● general-purpose: Survey wiki" "$row"
+has "колонка подзадач считает агента" "— а1" "$(printf '%s\n' "$row" | grep 0a9e01)"
+agent2 a1 '{"agentType":"general-purpose","description":"Survey wiki","requestShape":"background","toolUseId":"toolu_1","finished":true}' "$ENDREC"
+hasnt "закончивший агент под сессией не виден" "└ ● general-purpose" "$("$DISP" ls)"
+has "в подробностях он отмечен законченным" "✓ general-purpose: Survey wiki" "$("$DISP" show 0a9e01)"
+stop2 22500
+settle
+check "агенты закончили, ход окончен" "done" "$(field "claude-$CA2" .status)"
+has "уведомление о конце хода — теперь" "закончил ход (8м)" "$(tail -n 1 "$NOTES")"
+# Агенту воркфлоу отметку не ставят: что он работает — только догадка, ход по ней не держим.
+prompt2 23000
+agent2 w1 '{"agentType":"general-purpose","name":"/code-review 61","requestShape":"background"}' "$TOOLREC"
+stop2 23300
+check "агент без отметки об окончании ход не держит" "done" "$(field "claude-$CA2" .status)"
+# Ход ждал агента, агент закончил, а Claude Code молчит: ход завершает сверка.
+prompt2 24000
+agent2 a3 '{"agentType":"Explore","description":"Find icons","requestShape":"background","toolUseId":"toolu_3"}' "$TOOLREC"
+printf '%s\n' "$ENDREC" >>"$TR/$CA2.jsonl"
+stop2 24300
+check "второй ход ждёт агента" "working" "$(field "claude-$CA2" .status)"
+agent2 a3 '{"agentType":"Explore","description":"Find icons","requestShape":"background","toolUseId":"toolu_3","finished":true}' "$ENDREC"
+# Claude Code продолжил ход сам и запустил долгую команду: хуков нет, пока она не доработает.
+printf '%s\n' "$TOOLREC" >>"$TR/$CA2.jsonl"
+before="$(wc -l <"$NOTES")"
+DISP_NOW=$(($(date +%s) + 120)) "$DISP" ls >/dev/null
+settle
+check "Claude Code продолжил ход своей командой: ход не окончен" "working" "$(field "claude-$CA2" .status)"
+check "и уведомления нет" "$before" "$(wc -l <"$NOTES")"
+printf '%s\n' "$ENDREC" >>"$TR/$CA2.jsonl"
+DISP_NOW=$(($(date +%s) + 120)) "$DISP" ls >/dev/null
+settle
+check "ответ закончен, Claude Code молчит: ход окончен сверкой" "done" "$(field "claude-$CA2" .status)"
+check "и об этом пришло уведомление" "$((before + 1))" "$(wc -l <"$NOTES")"
+# Codex: журнал дочернего агента ссылается на родительскую сессию.
+CX="019a0000-0000-7000-8000-0000000c0de9"
+ev codex "{\"session_id\":\"$CX\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Проверь ошибки\"}" "${Z[@]}"
+mkdir -p "$CODEX_HOME/sessions/2026/11/22"
+printf '%s\n%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"child-1\",\"source\":{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\"$CX\",\"agent_path\":\"/root/errors\",\"agent_nickname\":\"Newton\"}}}}}" '{"type":"event_msg","payload":{"type":"task_started"}}' >"$CODEX_HOME/sessions/2026/11/22/rollout-x-child-1.jsonl"
+has "дочерний агент Codex виден под сессией" "└ ● Newton: errors" "$("$DISP" ls)"
 
 echo
 echo "итого: ok=$pass fail=$fail"

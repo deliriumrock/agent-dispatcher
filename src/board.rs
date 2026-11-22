@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::config::{self, Paths, Settings};
 use crate::detect;
 use crate::error::Result;
-use crate::model::{Session, Status, View};
+use crate::model::{Session, Status, SubAgent, View};
 use crate::panes;
 use crate::procs::{self, Activity};
 use crate::store::{self, JournalEvent, Store};
@@ -115,7 +115,7 @@ impl Row {
         }
     }
 
-    /// Колонка «ПОДЗ»: `1/3` — подзадачи, `а2` — активные субагенты, `ф1` — фоновые задачи.
+    /// Колонка «ПОДЗ»: `1/3` — подзадачи, `а2` — работающие агенты, `ф1` — фоновые задачи.
     pub fn subtasks(&self) -> String {
         let s = &self.session;
         let mut out = if s.subtasks.is_empty() {
@@ -124,15 +124,44 @@ impl Row {
             let done = s.subtasks.values().filter(|task| task.d).count();
             format!("{done}/{}", s.subtasks.len())
         };
-        if s.subagents > 0 {
-            let count = s.subagents;
+        // Агентов видно по их файлам, а начатых и законченных — ещё и по событиям хука.
+        let running = s.agents.iter().filter(|agent| agent.running).count();
+        let count = running.max(usize::try_from(s.subagents).unwrap_or(0));
+        if count > 0 {
             out.push_str(&tr!(" a{count}", " а{count}", " а{count}"));
         }
-        if s.bg > 0 {
+        // Фоновые агенты уже посчитаны выше: фоновые задачи тогда — они же.
+        let background_agents = s.agents.iter().any(|agent| agent.background);
+        if s.bg > 0 && !background_agents {
             let count = s.bg;
             out.push_str(&tr!(" b{count}", " ф{count}", " ф{count}"));
         }
         out
+    }
+
+    /// Строки работающих агентов сессии для показа под её строкой: не больше
+    /// `AGENT_LINES`; если агентов больше, последняя строка говорит, сколько ещё.
+    pub fn agent_lines(&self, now: i64) -> Vec<String> {
+        let running: Vec<&SubAgent> = self
+            .session
+            .agents
+            .iter()
+            .filter(|agent| agent.running)
+            .collect();
+        if running.len() <= AGENT_LINES {
+            return running.iter().map(|agent| agent_text(agent, now)).collect();
+        }
+        let mut lines: Vec<String> = running[..AGENT_LINES - 1]
+            .iter()
+            .map(|agent| agent_text(agent, now))
+            .collect();
+        let more = running.len() + 1 - AGENT_LINES;
+        lines.push(tr!(
+            "… {more} more agents",
+            "… ещё агентов: {more}",
+            "… ще агентів: {more}"
+        ));
+        lines
     }
 
     /// Колонка «ЧТО» для панели, с пометкой о приёмке. У сессии без названия показывается
@@ -268,7 +297,7 @@ pub fn details(row: &Row, now: i64) -> Vec<Detail> {
     field(t!("time", "время", "час"), times.join(" · "), Tone::Plain);
 
     let mut extra = Vec::new();
-    if s.subagents > 0 {
+    if s.subagents > 0 && s.agents.is_empty() {
         let count = s.subagents;
         extra.push(tr!("subagents running: {count}", "субагентов в работе: {count}", "субагентів у роботі: {count}"));
     }
@@ -278,6 +307,27 @@ pub fn details(row: &Row, now: i64) -> Vec<Detail> {
     }
     field(t!("also", "ещё", "ще"), extra.join(" · "), Tone::Plain);
     field(t!("session", "сессия", "сесія"), s.session_id.clone(), Tone::Muted);
+    if !s.agents.is_empty() {
+        let running = s.agents.iter().filter(|agent| agent.running).count();
+        let total = s.agents.len();
+        field(
+            t!("agents", "агенты", "агенти"),
+            tr!(
+                "running {running} of {total}",
+                "работают {running} из {total}",
+                "працюють {running} з {total}"
+            ),
+            Tone::Plain,
+        );
+        for agent in &s.agents {
+            let tone = if agent.running {
+                Tone::Plain
+            } else {
+                Tone::Muted
+            };
+            field("", agent_text(agent, now), tone);
+        }
+    }
     if !s.subtasks.is_empty() {
         field(t!("subtasks", "подзадачи", "підзадачі"), row.subtasks(), Tone::Plain);
         for task in s.subtasks.values() {
@@ -290,6 +340,27 @@ pub fn details(row: &Row, now: i64) -> Vec<Detail> {
         }
     }
     out
+}
+
+/// Сколько работающих агентов показывать строками под сессией.
+pub const AGENT_LINES: usize = 4;
+
+/// Агент одной строкой: `● general-purpose: Survey wiki · 7м`. У работающего — сколько он
+/// работает, у закончившего — сколько работал.
+pub fn agent_text(agent: &SubAgent, now: i64) -> String {
+    let mark = if agent.running { "●" } else { "✓" };
+    let kind = if agent.kind.is_empty() {
+        t!("agent", "агент", "агент")
+    } else {
+        agent.kind.as_str()
+    };
+    let end = if agent.running { now } else { agent.updated };
+    let took = age(end - agent.started);
+    if agent.what.is_empty() {
+        format!("{mark} {kind} · {took}")
+    } else {
+        format!("{mark} {kind}: {} · {took}", agent.what)
+    }
 }
 
 /// Текст или знак вопроса, если текста нет.
@@ -721,6 +792,50 @@ mod tests {
         let closed = row(Status::Done, true);
         assert_eq!(closed.place(), "закрыта");
         assert_eq!(closed.subtasks(), "—");
+    }
+
+    #[test]
+    fn agents_are_counted_and_listed() {
+        let agent = |id: &str, running: bool, background: bool| SubAgent {
+            id: id.to_string(),
+            kind: "general-purpose".to_string(),
+            what: format!("Задача {id}"),
+            background,
+            running,
+            started: 400,
+            updated: 900,
+        };
+        let mut working = row(Status::Working, false);
+        working.session.bg = 2;
+        // По событиям хука работает один агент, а по файлам видно уже трёх.
+        working.session.subagents = 1;
+        working.session.agents = (1..=6)
+            .map(|n| agent(&n.to_string(), n != 2, true))
+            .collect();
+        assert_eq!(working.subtasks(), "— а5");
+        let lines = working.agent_lines(1000);
+        assert_eq!(lines.len(), AGENT_LINES);
+        assert_eq!(lines[0], "● general-purpose: Задача 1 · 10м");
+        assert_eq!(lines[3], "… ещё агентов: 2");
+        let finished = agent("x", false, false);
+        assert_eq!(
+            agent_text(&finished, 1000),
+            "✓ general-purpose: Задача x · 8м"
+        );
+
+        // Без фоновых агентов фоновые задачи — что-то другое, их видно отдельно.
+        working.session.agents = vec![agent("f", true, false)];
+        assert_eq!(working.subtasks(), "— а1 ф2");
+        let fields = details(&working, 1000);
+        let listed: Vec<&str> = fields
+            .iter()
+            .skip_while(|field| field.key != "агенты")
+            .map(|field| field.value.as_str())
+            .collect();
+        assert_eq!(
+            listed,
+            ["работают 1 из 1", "● general-purpose: Задача f · 10м"]
+        );
     }
 
     #[test]
