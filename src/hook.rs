@@ -119,6 +119,8 @@ pub struct Context {
     pub agent_title: Option<String>,
     /// Процесс агента, если его удалось узнать на этом событии.
     pub process: Option<AgentProcess>,
+    /// Транскрипт сессии из события (`transcript_path`), если агент его назвал.
+    pub transcript: String,
 }
 
 /// Итог обработки события.
@@ -160,6 +162,9 @@ pub fn step(
         s.branch = ctx.branch.clone();
     }
     s.place = ctx.place.clone();
+    if !ctx.transcript.is_empty() {
+        s.transcript = Some(ctx.transcript.clone());
+    }
     if ctx.process.is_some() {
         s.process = ctx.process;
     }
@@ -454,6 +459,11 @@ fn handle(store: &Store, agent_arg: &str, event_arg: &str, raw: &[u8]) -> Result
     let Some(action) = Action::from_event(&event) else {
         return Ok(());
     };
+    // Запасной процесс Claude Code сообщает о начале сессии, ещё не получив работы, и может
+    // так её и не получить. Строка такой сессии появится с первым настоящим событием.
+    if agent == "claude" && action == Action::Start && detect::under_claude_spare() {
+        return Ok(());
+    }
 
     let sid = match sanitize(&text_of(
         payload,
@@ -576,6 +586,7 @@ fn handle(store: &Store, agent_arg: &str, event_arg: &str, raw: &[u8]) -> Result
         auto_ok_on_exit: settings.get("DISP_AUTO_OK_ON_EXIT") == Some("1"),
         agent_title,
         process,
+        transcript,
     };
 
     let lock = store.lock();

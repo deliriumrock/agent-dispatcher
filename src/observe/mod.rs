@@ -163,13 +163,15 @@ pub fn watch(store: Store) {
 /// Сверяет сессии в контейнерах с файлами диспетчера: перемены записывает и рассылает
 /// о них уведомления, как хук. Из одного процесса — не чаще раза в `EVERY` (командой
 /// движка — раз в `EXEC_EVERY`). `DISP_CONTAINERS=0` выключает наблюдение, `exec` —
-/// смотрит только командой движка.
+/// смотрит только командой движка. Перед этим закрывает сессии Claude Code, ушедшие
+/// в фон (`crate::handover`): о них хуки тоже не сообщают.
 pub fn sync(store: &Store) {
     static LAST: Mutex<Option<Instant>> = Mutex::new(None);
     static LAST_EXEC: Mutex<Option<Instant>> = Mutex::new(None);
     if !due(&LAST, EVERY) {
         return;
     }
+    crate::handover::sweep(store);
     let settings = Settings::load(&store.paths.conf_file);
     let mode = settings.get("DISP_CONTAINERS");
     if mode == Some("0") {
@@ -560,7 +562,7 @@ fn event_kind(line: &str) -> Option<String> {
 
 /// Строки из последних `bytes` байт файла, без первой неполной; и прочитан ли файл
 /// целиком.
-fn tail_lines(path: &Path, bytes: u64) -> (Vec<String>, bool) {
+pub(crate) fn tail_lines(path: &Path, bytes: u64) -> (Vec<String>, bool) {
     let Ok(mut file) = File::open(path) else {
         return (Vec::new(), true);
     };
@@ -861,6 +863,8 @@ fn update(store: &Store, settings: &Settings, seen: &Seen, now: i64) -> Result<b
         auto_ok_on_exit: false,
         agent_title: details.title.clone(),
         process: None,
+        // Транскрипт лежит внутри контейнера: передачу в фон там не отслеживаем.
+        transcript: String::new(),
     };
     let lock = store.lock();
     // Перемену мог уже записать другой процесс: значок и панель смотрят независимо.

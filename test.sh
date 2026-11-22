@@ -381,6 +381,32 @@ has "пометка о закрытом агенте" "агент закрыт" 
 "$DISP" ok 0057c4 >/dev/null
 check "строку закрытого агента убирают без -f" "true" "$(field "claude-$SP" .accepted)"
 
+echo "== 15. Claude: сессия ушла в фон"
+# Claude Code продолжает разговор в новой фоновой сессии, а в транскрипт прежней дописывает
+# continued-in. Ни Stop, ни SessionEnd прежняя сессия не присылает, а когда появится запись
+# относительно событий новой сессии, не определено: здесь — позже первого из них.
+export DISP_NOW=21000
+CP="dddddddd-4444-4444-8444-0000000b0a11"   # прежняя, в панели
+CN="eeeeeeee-5555-4555-8555-0000000b0a12"   # фоновая, в ней разговор продолжен
+CS="ffffffff-6666-4666-8666-0000000b0a13"   # запасной процесс, так и не получивший работы
+TR="$T/claude-projects/-w"
+mkdir -p "$TR"
+printf '%s\n' "{\"type\":\"user\",\"cwd\":\"$T/site-31\"}" >"$TR/$CP.jsonl"
+ev claude "{\"session_id\":\"$CP\",\"cwd\":\"$T/site-31\",\"transcript_path\":\"$TR/$CP.jsonl\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Поправь иконку\"}" "${Z[@]}"
+spare() { # spare <json>: хук под запасным процессом Claude Code (claude bg-spare --bg-spare …)
+  printf '%s' "$1" | env "${Z[@]}" bash -c '"$0" hook claude; true' "$DISP" --bg-spare "$T/spare.sock"
+}
+spare "{\"session_id\":\"$CS\",\"cwd\":\"$T\",\"hook_event_name\":\"SessionStart\",\"source\":\"startup\"}"
+spare "{\"session_id\":\"$CN\",\"cwd\":\"$T\",\"transcript_path\":\"$TR/$CN.jsonl\",\"hook_event_name\":\"SessionStart\",\"source\":\"startup\"}"
+check "SessionStart запасного процесса строку не создаёт" "0" "$(ls "$DISP_STATE_DIR/sessions" | grep -c -e "$CS" -e "$CN")"
+spare "{\"session_id\":\"$CN\",\"cwd\":\"$T/site-31\",\"transcript_path\":\"$TR/$CN.jsonl\",\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Edit\"}"
+check "фоновая сессия появилась с первым настоящим событием" "working" "$(field "claude-$CN" .status)"
+has "записи о передаче ещё нет: прежняя сессия в списке" "0b0a11" "$("$DISP" ls)"
+printf '%s\n' "{\"type\":\"continued-in\",\"sessionId\":\"$CP\",\"continuedInSessionId\":\"$CN\"}" >>"$TR/$CP.jsonl"
+hasnt "запись о передаче появилась: прежней сессии в списке нет" "0b0a11" "$("$DISP" ls)"
+check "прежняя сессия закрыта и убрана из списка" "true/true/continued" "$(field "claude-$CP" '"\(.ended)/\(.accepted)/\(.end_reason)"')"
+has "фоновая сессия осталась" "0b0a12" "$("$DISP" ls)"
+
 echo
 echo "итого: ok=$pass fail=$fail"
 rm -rf "$T" "$VS"
