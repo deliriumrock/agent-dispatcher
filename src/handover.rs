@@ -34,16 +34,27 @@ pub fn sweep(store: &Store) {
 fn sweep_at(store: &Store, now: i64) {
     for (file, session) in store.all() {
         let handed = watched(&session).is_some_and(|transcript| handed_over(Path::new(transcript)));
-        if !handed {
-            continue;
-        }
-        let _lock = store.lock();
-        // Под блокировкой перечитываем: сессию мог только что обновить хук.
-        if let Some(fresh) = store::read_session(&file).filter(|fresh| watched(fresh).is_some()) {
-            // Не удалось записать — попробуем на следующей сверке.
-            let _ = store::write_session(&file, &hand_over(fresh, now));
+        if handed {
+            close(store, &file, &session, now);
         }
     }
+}
+
+/// Закрывает сессию из файла `file`, в которой сверка увидела передачу разговора, если
+/// это всё ещё так. Пока сверка ждала блокировку, хук мог записать новый ход сессии, а
+/// Claude Code — дописать его в транскрипт: тогда сессия продолжается, и закрывать её
+/// нельзя. Поэтому под блокировкой запись сессии сверяется с той, что видела сверка, а
+/// конец транскрипта читается заново. Возвращает, закрыта ли сессия.
+fn close(store: &Store, file: &Path, seen: &Session, now: i64) -> bool {
+    let _lock = store.lock();
+    let Some(fresh) = store::read_session(file) else {
+        return false;
+    };
+    let unchanged = fresh.updated == seen.updated && fresh.status == seen.status;
+    let still = watched(&fresh)
+        .is_some_and(|transcript| detect::claude_continued_in(Path::new(transcript)).is_some());
+    // Не удалось записать — попробуем на следующей сверке.
+    unchanged && still && store::write_session(file, &hand_over(fresh, now)).is_ok()
 }
 
 /// Транскрипт открытой сессии Claude Code на этой машине, если хук его сообщил.
@@ -174,6 +185,30 @@ mod tests {
         assert_eq!(old.end_reason.as_deref(), Some("continued"));
         assert_eq!((old.accepted_at, old.updated), (Some(200), 200));
         assert!(!read(&store, "new").ended);
+    }
+
+    #[test]
+    fn session_resumed_while_the_sweep_waited_is_kept() {
+        let scratch = Scratch::new("race");
+        let store = scratch.store();
+        let file = store.session_file("claude", "old");
+        let seen = scratch.session(&store, "old", &[USER, MARKER]);
+
+        // Пока сверка ждала блокировку, хук записал новый ход.
+        let mut resumed = seen.clone();
+        resumed.updated += 1;
+        assert!(store::write_session(&file, &resumed).is_ok());
+        assert!(!close(&store, &file, &seen, 100));
+        // Claude Code дописал ход в транскрипт, а хук ещё не успел.
+        assert!(store::write_session(&file, &seen).is_ok());
+        scratch.append("old", USER);
+        assert!(!close(&store, &file, &seen, 100));
+        assert!(!read(&store, "old").ended);
+
+        // Ничего не изменилось — сессия закрывается.
+        scratch.append("old", MARKER);
+        assert!(close(&store, &file, &seen, 100));
+        assert!(read(&store, "old").accepted);
     }
 
     #[test]
