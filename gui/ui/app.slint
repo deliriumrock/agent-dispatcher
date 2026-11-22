@@ -34,6 +34,11 @@ export struct SessionRow {
     subtasks: string,
     accepted: bool,
     segments: [Segment],
+    // Работающие агенты сессии, по строке на агента: показываются под ней.
+    agents: [string],
+    // Место строки в списке: строки с агентами выше обычных.
+    top: length,
+    height: length,
 }
 
 // Поле подробностей выбранной сессии.
@@ -219,7 +224,7 @@ component SessionItem inherits Rectangle {
     property <bool> alarm: (root.session.kind <= 3) && !root.session.accepted;
     property <color> accent: Theme.status(root.session.kind);
 
-    height: 52px;
+    height: root.session.height;
     background: root.selected ? Theme.card-selected : (touch.has-hover ? Theme.card-hover : transparent);
 
     if root.alarm: Rectangle {
@@ -244,6 +249,8 @@ component SessionItem inherits Rectangle {
     }
 
     HorizontalLayout {
+        y: 0;
+        height: 52px;
         padding-left: 14px;
         padding-right: 12px;
         spacing: 14px;
@@ -313,6 +320,19 @@ component SessionItem inherits Rectangle {
         }
     }
 
+    // Работающие агенты сессии — под её строкой.
+    for agent[line] in root.session.agents: Text {
+        x: 28px;
+        y: 50px + line * 18px;
+        width: parent.width - 40px;
+        height: 18px;
+        text: "└ " + agent;
+        color: Theme.muted;
+        font-size: 12px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
     // Разделитель между строками.
     Rectangle {
         y: parent.height - 1px;
@@ -376,17 +396,20 @@ export component AppWindow inherits Window {
     callback rename(string);
 
     property <color> selected-accent: Theme.status(root.selected-kind);
-    property <length> row-height: 52px;
     // Ширина ленты времени; ноль — лент нет. Её считает программа по ширине окна:
     // привязка к ширине окна прямо здесь зациклила бы расчёт раскладки.
     in property <length> lane-width;
 
-    // Прокручивает список так, чтобы выбранная строка была видна.
+    // Прокручивает список так, чтобы выбранная строка была видна. Высота строк разная:
+    // под сессией — её работающие агенты.
     public function reveal() {
-        if (root.selected * root.row-height < -list.content-y) {
-            list.content-y = -root.selected * root.row-height;
-        } else if ((root.selected + 1) * root.row-height > -list.content-y + list.height) {
-            list.content-y = list.height - (root.selected + 1) * root.row-height;
+        if (root.rows.length == 0) {
+            return;
+        }
+        if (root.rows[root.selected].top < -list.content-y) {
+            list.content-y = -root.rows[root.selected].top;
+        } else if (root.rows[root.selected].top + root.rows[root.selected].height > -list.content-y + list.height) {
+            list.content-y = list.height - root.rows[root.selected].top - root.rows[root.selected].height;
         }
     }
 
@@ -603,11 +626,11 @@ export component AppWindow inherits Window {
         // Список сессий.
         list := Flickable {
             vertical-stretch: 1;
-            content-height: root.rows.length * root.row-height;
+            content-height: root.rows.length == 0 ? 0px : root.rows[root.rows.length - 1].top + root.rows[root.rows.length - 1].height;
             content-width: self.width;
 
             for row[index] in root.rows: SessionItem {
-                y: index * root.row-height;
+                y: row.top;
                 width: list.width;
                 session: row;
                 ticks: root.ticks;

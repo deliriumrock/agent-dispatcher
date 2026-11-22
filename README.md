@@ -76,6 +76,15 @@ containers do that); otherwise, and on macOS, through `docker exec` or
 `podman exec`. The WHERE column shows `container <id>`, as in `docker ps`. Turn
 it off with `DISP_CONTAINERS=0`.
 
+Agents that a session starts itself are listed under its row: Claude Code
+subagents (type and task description) and Codex child agents (name and task).
+The row shows the running ones with how long they have run. The details
+(`disp show`, Enter in the panel) list every agent of the current turn, with
+finished ones marked ✓, and the tray menu shows the running ones. The SUB column
+counts running agents (`a2`). If Claude Code ends its turn while its background
+agents still run, the session stays “working”: Claude Code resumes the turn
+itself when they finish, and the notification comes then.
+
 Settings are `DISP_*` variables in the environment or in `~/.config/disp/env`:
 Telegram (`DISP_TG_TOKEN`, `DISP_TG_CHAT`), the minimum turn length worth a
 notification (`DISP_NOTIFY_MIN_SEC`, 120 s), the silence threshold

@@ -126,6 +126,32 @@ pub struct AgentProcess {
     pub start: u64,
 }
 
+/// Агент, которого запустила сессия: субагент Claude Code или дочерний агент Codex.
+/// Список ведёт сверка (`crate::agents`) по файлам самих агентов.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubAgent {
+    /// Идентификатор агента.
+    pub id: String,
+    /// Тип агента (`general-purpose`, `Explore`), у Codex — его имя (`Newton`).
+    #[serde(default)]
+    pub kind: String,
+    /// Что ему поручено: описание у Claude Code, имя задачи у Codex.
+    #[serde(default)]
+    pub what: String,
+    /// Фоновый ли агент: ход родителя его не ждёт.
+    #[serde(default)]
+    pub background: bool,
+    /// Работает ли агент сейчас.
+    #[serde(default)]
+    pub running: bool,
+    /// Когда агент запущен, unix-секунды.
+    #[serde(default)]
+    pub started: i64,
+    /// Когда агент последний раз что-то записал, unix-секунды.
+    #[serde(default)]
+    pub updated: i64,
+}
+
 /// Подзадача сессии (у Claude Code — события TaskCreated и TaskCompleted).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subtask {
@@ -225,6 +251,9 @@ pub struct Session {
     /// сессия давно молчит.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<AgentProcess>,
+    /// Агенты, которых сессия запустила в текущем ходе, и те, что ещё работают.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<SubAgent>,
     /// Контейнер, в котором идёт сессия (начало его идентификатора), если её ведёт
     /// наблюдатель (`crate::observe`), а не хуки.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -245,6 +274,16 @@ impl Session {
         task_label(&self.task, &self.branch)
     }
 
+    /// Последнее, что известно о работе сессии: её событие или запись её работающего
+    /// агента. Дочерние агенты Codex хуков в сессию не присылают, а работа идёт.
+    pub fn last_activity(&self) -> i64 {
+        self.agents
+            .iter()
+            .filter(|agent| agent.running)
+            .map(|agent| agent.updated)
+            .fold(self.updated, i64::max)
+    }
+
     /// Вид на доске в момент `now`; `stale_min` — через сколько минут молчания
     /// работающая сессия считается молчащей. Что с ней на самом деле, уточняет
     /// проверка процессов (`crate::procs`).
@@ -254,7 +293,7 @@ impl Session {
             Status::Error => View::Err,
             Status::Done => View::Done,
             Status::Working if self.ended => View::Lost,
-            Status::Working if now - self.updated > stale_min * 60 => View::Quiet,
+            Status::Working if now - self.last_activity() > stale_min * 60 => View::Quiet,
             Status::Working => View::Work,
             Status::Idle => View::Idle,
         }

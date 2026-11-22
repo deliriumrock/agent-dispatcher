@@ -7,6 +7,7 @@ export DISP_STATE_DIR="$T/state" DISP_CONFIG="$T/env" DISP_DESKTOP=0 DISP_COLOR=
 export DISP_PANE_TITLE=0   # настоящий zellij в тестах не опрашиваем; раздел 12 подставляет свой
 export DISP_CONTAINERS=0   # агенты в контейнерах этой машины в тестовый список не попадают
 export DISP_LANG=ru   # ожидания написаны по-русски; другие языки проверяет раздел 5
+export CODEX_HOME="$T/codex"   # дочерних агентов Codex ищем в тестовом каталоге, не в настоящем
 export XDG_STATE_HOME="$T/xdg"
 NOTES="$T/notes.log"
 cat >"$T/notify.sh" <<EOF
@@ -406,6 +407,40 @@ printf '%s\n' "{\"type\":\"continued-in\",\"sessionId\":\"$CP\",\"continuedInSes
 hasnt "запись о передаче появилась: прежней сессии в списке нет" "0b0a11" "$("$DISP" ls)"
 check "прежняя сессия закрыта и убрана из списка" "true/true/continued" "$(field "claude-$CP" '"\(.ended)/\(.accepted)/\(.end_reason)"')"
 has "фоновая сессия осталась" "0b0a12" "$("$DISP" ls)"
+
+echo "== 16. Агенты, которых запускает сессия"
+# Claude Code: на каждого субагента meta.json рядом с транскриптом, по окончании — "finished".
+export DISP_NOW=22000
+CA2="abababab-7777-4777-8777-0000000a9e01"
+TA="$TR/$CA2"
+mkdir -p "$TA/subagents"
+printf '%s\n' "{\"type\":\"user\",\"cwd\":\"$T/site-31\"}" >"$TR/$CA2.jsonl"
+ev claude "{\"session_id\":\"$CA2\",\"cwd\":\"$T/site-31\",\"transcript_path\":\"$TR/$CA2.jsonl\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Опиши виджеты\"}" "${Z[@]}"
+printf '%s' '{"agentType":"general-purpose","description":"Survey wiki","requestShape":"background"}' >"$TA/subagents/agent-a1.meta.json"
+printf '{}\n' >"$TA/subagents/agent-a1.jsonl"
+export DISP_NOW=22300
+before="$(wc -l <"$NOTES")"
+ev claude "{\"session_id\":\"$CA2\",\"cwd\":\"$T/site-31\",\"transcript_path\":\"$TR/$CA2.jsonl\",\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"Жду агентов\",\"background_tasks\":1}" "${Z[@]}"
+settle
+check "ход ждёт фонового агента: сессия работает" "working" "$(field "claude-$CA2" .status)"
+check "о конце хода, который ждёт агентов, не сообщаем" "$before" "$(wc -l <"$NOTES")"
+row="$("$DISP" ls)"
+has "агент виден строкой под сессией" "└ ● general-purpose: Survey wiki" "$row"
+has "колонка подзадач считает агента" "— а1" "$(printf '%s\n' "$row" | grep 0a9e01)"
+printf '%s' '{"agentType":"general-purpose","description":"Survey wiki","requestShape":"background","finished":true}' >"$TA/subagents/agent-a1.meta.json"
+hasnt "закончивший агент под сессией не виден" "└ ● general-purpose" "$("$DISP" ls)"
+has "в подробностях он отмечен законченным" "✓ general-purpose: Survey wiki" "$("$DISP" show 0a9e01)"
+export DISP_NOW=22500
+ev claude "{\"session_id\":\"$CA2\",\"cwd\":\"$T/site-31\",\"transcript_path\":\"$TR/$CA2.jsonl\",\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"Готово\"}" "${Z[@]}"
+settle
+check "агенты закончили, ход окончен" "done" "$(field "claude-$CA2" .status)"
+has "уведомление о конце хода — теперь" "закончил ход (8м)" "$(tail -n 1 "$NOTES")"
+# Codex: журнал дочернего агента ссылается на родительскую сессию.
+CX="019a0000-0000-7000-8000-0000000c0de9"
+ev codex "{\"session_id\":\"$CX\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Проверь ошибки\"}" "${Z[@]}"
+mkdir -p "$CODEX_HOME/sessions/2026/11/22"
+printf '%s\n%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"child-1\",\"source\":{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\"$CX\",\"agent_path\":\"/root/errors\",\"agent_nickname\":\"Newton\"}}}}}" '{"type":"event_msg","payload":{"type":"task_started"}}' >"$CODEX_HOME/sessions/2026/11/22/rollout-x-child-1.jsonl"
+has "дочерний агент Codex виден под сессией" "└ ● Newton: errors" "$("$DISP" ls)"
 
 echo
 echo "итого: ok=$pass fail=$fail"

@@ -536,3 +536,81 @@ fn half_written_session_meta_is_read_again() {
     );
     assert_eq!(codex_meta(&rollout).map(|meta| meta.sid), Some("x1".to_string()));
 }
+
+#[test]
+fn codex_children_are_found_by_their_parent() {
+    let dir = Dir::new("children");
+    let spawn = |id: &str, parent: &str, name: &str, path: &str| {
+        format!(
+            concat!(
+                r#"{{"type":"session_meta","payload":{{"id":"{id}","timestamp":"2026-11-18T14:24:16.480Z","#,
+                r#""source":{{"subagent":{{"thread_spawn":{{"parent_thread_id":"{parent}","depth":1,"#,
+                r#""agent_path":"{path}","agent_nickname":"{name}","agent_role":null}}}}}}}}}}"#,
+                "\n"
+            ),
+            id = id,
+            parent = parent,
+            name = name,
+            path = path,
+        )
+    };
+    let started = r#"{"type":"event_msg","payload":{"type":"task_started"}}"#;
+    let complete = r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#;
+    let day = "sessions/2026/11/18";
+    dir.write(
+        &format!("{day}/rollout-1-c1.jsonl"),
+        &format!("{}{started}\n", spawn("c1", "p1", "Newton", "/root/errors")),
+    );
+    dir.write(
+        &format!("{day}/rollout-2-c2.jsonl"),
+        &format!(
+            "{}{started}\n{complete}\n",
+            spawn("c2", "p1", "Locke", "/root/docs")
+        ),
+    );
+    // Чужой родитель, проверка Guardian и обычная сессия человека — не агенты p1.
+    dir.write(
+        &format!("{day}/rollout-3-c3.jsonl"),
+        &format!("{}{started}\n", spawn("c3", "other", "Pasteur", "/root/x")),
+    );
+    dir.write(
+        &format!("{day}/rollout-4-g.jsonl"),
+        concat!(
+            r#"{"type":"session_meta","payload":{"id":"g","source":{"subagent":{"other":"guardian"}}}}"#,
+            "\n"
+        ),
+    );
+    dir.write(
+        &format!("{day}/rollout-5-p1.jsonl"),
+        concat!(
+            r#"{"type":"session_meta","payload":{"id":"p1","source":"cli"}}"#,
+            "\n"
+        ),
+    );
+    let now = modified(&dir.0.join(format!("{day}/rollout-1-c1.jsonl"))).unwrap_or(0);
+    let parents = HashMap::from([("p1".to_string(), now - 60)]);
+    let found = codex_children(&dir.0.join("sessions"), &parents, now, 1800);
+    let mut agents: Vec<(String, String, bool, i64)> = found
+        .get("p1")
+        .into_iter()
+        .flatten()
+        .map(|agent| {
+            (
+                agent.kind.clone(),
+                agent.what.clone(),
+                agent.running,
+                agent.started,
+            )
+        })
+        .collect();
+    agents.sort();
+    let at = 1_795_011_856;
+    assert_eq!(
+        agents,
+        [
+            ("Locke".to_string(), "docs".to_string(), false, at),
+            ("Newton".to_string(), "errors".to_string(), true, at),
+        ]
+    );
+    assert_eq!(found.len(), 1);
+}

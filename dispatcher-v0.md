@@ -288,6 +288,8 @@ disp unlabel         снять эти подписи со всех панеле
 
 **Claude в фоне — «завис» и пустая сессия, сборки 0.8.019–0.8.020.** Сессию Claude Code отправили в фон, и в списке остались две лишние строки. Прежняя сессия висела «? завис»: Claude Code продолжает разговор в новой фоновой сессии, а прежняя не присылает ни Stop, ни SessionEnd. Он только дописывает в её транскрипт последнюю запись `{"type":"continued-in","continuedInSessionId":"<новая>"}`; процесс в панели при этом жив и показывает уже фоновую сессию. Рядом появлялась пустая сессия «○ простой» с задачей по каталогу запуска: это запасной процесс `claude bg-spare --bg-spare <сокет>`, который Claude Code держит наготове. Он сообщает SessionStart сразу при запуске, а работу может так и не получить. Теперь хук запоминает транскрипт сессии (поле `transcript`), а каждая сверка (`observe::sync`: значок, `disp watch` и окно раз в 2 с, `disp ls` перед выводом) смотрит концы транскриптов открытых сессий Claude Code (`src/handover.rs`). Сессия, транскрипт которой кончается записью `continued-in`, закрывается и убирается из списка (причина `continued`), работа видна в строке новой. Если после этой записи в прежней сессии снова есть ход (`user` или `assistant`), она не трогается. Транскрипт, не изменившийся с прошлой сверки, не перечитывается. В 0.8.019 это проверял хук на первом событии новой сессии; ревью показало, что запись может появиться позже этого события, и тогда прежняя строка оставалась. SessionStart от запасного процесса пропускается (`under_claude_spare`): строка фоновой сессии появляется с её первым настоящим событием, а запасной процесс без работы в список не попадает. Раздел 15 приёмочного набора проверяет оба случая, запись о передаче в нём появляется после первого события фоновой сессии; на сборке 0.8.019 две его проверки падают.
 
+**Агенты, которых запускает сессия, сборка 0.8.021.** В панели 4 Claude Code закончил ход и ждал двух фоновых агентов («Waiting for 2 background agents to finish»), а диспетчер показывал «✓ ГОТОВО» и пометку `ф2`: самих агентов видно не было, и уведомление о конце хода приходило, хотя работа шла. Теперь сверка (`observe::sync`) собирает у открытых сессий список агентов (`src/agents.rs`, поле `agents`). Claude Code кладёт рядом с транскриптом сессии `<сессия>/subagents/agent-<id>.meta.json`: тип, описание, фоновый ли агент, а по окончании — `"finished": true`; транскрипт агента рядом. Codex пишет журнал дочернего агента как отдельную сессию, в первой строке — `source.subagent.thread_spawn` с `parent_thread_id`, именем (`Newton`) и путём задачи (`/root/errors`) (`observe::codex_children`); проверки Guardian агентами сессии не считаются. Агент без отметки об окончании считается работающим, пока его журнал менялся не дольше порога молчания (`DISP_STALE_MIN`). В списке — агенты текущего хода и те, что ещё работают, не больше 20. Работающие агенты видны строками под сессией в `disp`, в панели (`└ ● general-purpose: Survey wiki · 7м`, не больше четырёх строк и «… ещё агентов: N») и в окне; в подробностях — все, законченные с ✓; в меню значка — работающие. Колонка ПОДЗ считает работающих агентов; `ф` для фоновых задач не показывается, если они и есть эти агенты. На конце хода хук смотрит, не ждёт ли Claude Code своих фоновых агентов (`agents::waiting_for`): тогда сессия остаётся «работает» и уведомления нет — Claude Code сам продолжит ход, когда агенты закончат, и сообщит о конце уже он. Работающие агенты считаются и для порога молчания: дочерние агенты Codex событий в сессию не присылают. Раздел 16 приёмочного набора проверяет фонового агента Claude от конца хода до уведомления и дочернего агента Codex.
+
 **Молчащие сессии: проверка процессов, сборка 0.8.004.** Статус «тихо» был догадкой: сессия числится работающей, а событий нет 30 минут. Так выглядели и долгая команда (тесты в контейнере), и зависший агент, и агент, которого закрыли без события конца. Теперь для такой сессии `disp` смотрит процессы (`src/procs.rs`):
 
 - **Идёт команда агента** — строка остаётся «● работает», в «ЧТО» видно команду и сколько она идёт: «команда 42м: pytest -q». Команда Claude Code — оболочка, запущенная самим `claude`; в её окружении `CLAUDE_CODE_SESSION_ID` и `CLAUDE_PID`. Серверы MCP получают ту же переменную, но они не оболочки. Команды интерфейса Codex 0.169 запускает не окно сессии, а общий фоновый процесс `codex app-server` через свою песочницу (`codex-linux-sandbox`, `bwrap`); с сессией их связывает `CODEX_THREAD_ID` в окружении.
@@ -1248,6 +1250,7 @@ export DISP_STATE_DIR="$T/state" DISP_CONFIG="$T/env" DISP_DESKTOP=0 DISP_COLOR=
 export DISP_PANE_TITLE=0   # настоящий zellij в тестах не опрашиваем; раздел 12 подставляет свой
 export DISP_CONTAINERS=0   # агенты в контейнерах этой машины в тестовый список не попадают
 export DISP_LANG=ru   # ожидания написаны по-русски; другие языки проверяет раздел 5
+export CODEX_HOME="$T/codex"   # дочерних агентов Codex ищем в тестовом каталоге, не в настоящем
 export XDG_STATE_HOME="$T/xdg"
 NOTES="$T/notes.log"
 cat >"$T/notify.sh" <<EOF
@@ -1647,6 +1650,40 @@ printf '%s\n' "{\"type\":\"continued-in\",\"sessionId\":\"$CP\",\"continuedInSes
 hasnt "запись о передаче появилась: прежней сессии в списке нет" "0b0a11" "$("$DISP" ls)"
 check "прежняя сессия закрыта и убрана из списка" "true/true/continued" "$(field "claude-$CP" '"\(.ended)/\(.accepted)/\(.end_reason)"')"
 has "фоновая сессия осталась" "0b0a12" "$("$DISP" ls)"
+
+echo "== 16. Агенты, которых запускает сессия"
+# Claude Code: на каждого субагента meta.json рядом с транскриптом, по окончании — "finished".
+export DISP_NOW=22000
+CA2="abababab-7777-4777-8777-0000000a9e01"
+TA="$TR/$CA2"
+mkdir -p "$TA/subagents"
+printf '%s\n' "{\"type\":\"user\",\"cwd\":\"$T/site-31\"}" >"$TR/$CA2.jsonl"
+ev claude "{\"session_id\":\"$CA2\",\"cwd\":\"$T/site-31\",\"transcript_path\":\"$TR/$CA2.jsonl\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Опиши виджеты\"}" "${Z[@]}"
+printf '%s' '{"agentType":"general-purpose","description":"Survey wiki","requestShape":"background"}' >"$TA/subagents/agent-a1.meta.json"
+printf '{}\n' >"$TA/subagents/agent-a1.jsonl"
+export DISP_NOW=22300
+before="$(wc -l <"$NOTES")"
+ev claude "{\"session_id\":\"$CA2\",\"cwd\":\"$T/site-31\",\"transcript_path\":\"$TR/$CA2.jsonl\",\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"Жду агентов\",\"background_tasks\":1}" "${Z[@]}"
+settle
+check "ход ждёт фонового агента: сессия работает" "working" "$(field "claude-$CA2" .status)"
+check "о конце хода, который ждёт агентов, не сообщаем" "$before" "$(wc -l <"$NOTES")"
+row="$("$DISP" ls)"
+has "агент виден строкой под сессией" "└ ● general-purpose: Survey wiki" "$row"
+has "колонка подзадач считает агента" "— а1" "$(printf '%s\n' "$row" | grep 0a9e01)"
+printf '%s' '{"agentType":"general-purpose","description":"Survey wiki","requestShape":"background","finished":true}' >"$TA/subagents/agent-a1.meta.json"
+hasnt "закончивший агент под сессией не виден" "└ ● general-purpose" "$("$DISP" ls)"
+has "в подробностях он отмечен законченным" "✓ general-purpose: Survey wiki" "$("$DISP" show 0a9e01)"
+export DISP_NOW=22500
+ev claude "{\"session_id\":\"$CA2\",\"cwd\":\"$T/site-31\",\"transcript_path\":\"$TR/$CA2.jsonl\",\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"Готово\"}" "${Z[@]}"
+settle
+check "агенты закончили, ход окончен" "done" "$(field "claude-$CA2" .status)"
+has "уведомление о конце хода — теперь" "закончил ход (8м)" "$(tail -n 1 "$NOTES")"
+# Codex: журнал дочернего агента ссылается на родительскую сессию.
+CX="019a0000-0000-7000-8000-0000000c0de9"
+ev codex "{\"session_id\":\"$CX\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Проверь ошибки\"}" "${Z[@]}"
+mkdir -p "$CODEX_HOME/sessions/2026/11/22"
+printf '%s\n%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"child-1\",\"source\":{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\"$CX\",\"agent_path\":\"/root/errors\",\"agent_nickname\":\"Newton\"}}}}}" '{"type":"event_msg","payload":{"type":"task_started"}}' >"$CODEX_HOME/sessions/2026/11/22/rollout-x-child-1.jsonl"
+has "дочерний агент Codex виден под сессией" "└ ● Newton: errors" "$("$DISP" ls)"
 
 echo
 echo "итого: ok=$pass fail=$fail"

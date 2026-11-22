@@ -13,6 +13,7 @@ use std::path::Path;
 use chrono::Local;
 use serde_json::{Map, Value};
 
+use crate::agents;
 use crate::config::{self, Paths, Settings};
 use crate::detect;
 use crate::error::Result;
@@ -121,6 +122,8 @@ pub struct Context {
     pub process: Option<AgentProcess>,
     /// Транскрипт сессии из события (`transcript_path`), если агент его назвал.
     pub transcript: String,
+    /// Сколько фоновых агентов Claude Code ещё работают на конце хода (`agents::waiting_for`).
+    pub waiting_agents: usize,
 }
 
 /// Итог обработки события.
@@ -291,13 +294,19 @@ pub fn step(
             if !reply.is_empty() {
                 s.last_reply = Some(clip(&reply, 300));
             }
-            s.status = Status::Done;
-            s.done_at = Some(ctx.now);
             s.detail.clear();
             s.bg = background;
             s.subagents = 0;
-            s.accepted = false;
-            if lasted >= ctx.notify_min_sec {
+            if ctx.waiting_agents > 0 {
+                // Claude Code ждёт своих фоновых агентов и, когда они закончат, сам
+                // продолжит ход: он не окончен, и сообщать о конце рано.
+                s.status = Status::Working;
+            } else {
+                s.status = Status::Done;
+                s.done_at = Some(ctx.now);
+                s.accepted = false;
+            }
+            if s.status == Status::Done && lasted >= ctx.notify_min_sec {
                 let in_background = if background > 0 {
                     tr!(
                         " · in background: {background}",
@@ -571,6 +580,13 @@ fn handle(store: &Store, agent_arg: &str, event_arg: &str, raw: &[u8]) -> Result
     } else {
         None
     };
+    // Конец хода Claude Code: не ждёт ли он своих фоновых агентов.
+    let waiting_agents = if agent == "claude" && action == Action::Stop {
+        let stale = settings.int("DISP_STALE_MIN", 30) * 60;
+        agents::waiting_for(&transcript, config::now(), stale)
+    } else {
+        0
+    };
     let ctx = Context {
         agent,
         sid,
@@ -587,6 +603,7 @@ fn handle(store: &Store, agent_arg: &str, event_arg: &str, raw: &[u8]) -> Result
         agent_title,
         process,
         transcript,
+        waiting_agents,
     };
 
     let lock = store.lock();
@@ -786,6 +803,28 @@ mod tests {
             &ctx(10),
         );
         assert_eq!(by_agent.state.status, Status::Working);
+    }
+
+    #[test]
+    fn turn_waiting_for_background_agents_is_not_over() {
+        let started = apply(
+            None,
+            "UserPromptSubmit",
+            json!({"prompt": "собери"}),
+            &ctx(1000),
+        );
+        let mut waiting = ctx(1300);
+        waiting.waiting_agents = 2;
+        let stop = json!({"last_assistant_message": "жду агентов"});
+        let held = apply(Some(&started.state), "Stop", stop.clone(), &waiting);
+        assert_eq!(held.state.status, Status::Working);
+        assert_eq!(held.state.done_at, None);
+        assert_eq!(held.state.last_reply.as_deref(), Some("жду агентов"));
+        assert!(held.note.is_none(), "о конце хода сообщать рано");
+        // Агенты закончили, Claude Code продолжил ход и закончил его сам.
+        let done = apply(Some(&held.state), "Stop", stop, &ctx(1600));
+        assert_eq!(done.state.status, Status::Done);
+        assert!(done.note.is_some_and(|note| note.text.contains("10м")));
     }
 
     #[test]

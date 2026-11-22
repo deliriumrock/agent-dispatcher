@@ -37,7 +37,7 @@ use crate::config::{self, Settings};
 use crate::detect;
 use crate::error::Result;
 use crate::hook::{self, Action, Context};
-use crate::model::{Session, Status};
+use crate::model::{Session, Status, SubAgent};
 use crate::notify;
 use crate::procs::Procs;
 use crate::store::{self, Store};
@@ -164,7 +164,8 @@ pub fn watch(store: Store) {
 /// о них уведомления, как хук. Из одного процесса — не чаще раза в `EVERY` (командой
 /// движка — раз в `EXEC_EVERY`). `DISP_CONTAINERS=0` выключает наблюдение, `exec` —
 /// смотрит только командой движка. Перед этим закрывает сессии Claude Code, ушедшие
-/// в фон (`crate::handover`): о них хуки тоже не сообщают.
+/// в фон (`crate::handover`), и обновляет списки агентов, которых запустили сессии
+/// (`crate::agents`): об этом хуки тоже не сообщают.
 pub fn sync(store: &Store) {
     static LAST: Mutex<Option<Instant>> = Mutex::new(None);
     static LAST_EXEC: Mutex<Option<Instant>> = Mutex::new(None);
@@ -172,6 +173,7 @@ pub fn sync(store: &Store) {
         return;
     }
     crate::handover::sweep(store);
+    crate::agents::sweep(store);
     let settings = Settings::load(&store.paths.conf_file);
     let mode = settings.get("DISP_CONTAINERS");
     if mode == Some("0") {
@@ -502,6 +504,116 @@ fn codex_meta(rollout: &Path) -> Option<Meta> {
         cache.insert(rollout.to_path_buf(), meta.clone());
     }
     meta
+}
+
+/// Дочерний агент Codex: первая строка его журнала.
+#[derive(Clone, Debug)]
+struct Child {
+    id: String,
+    parent: String,
+    name: String,
+    task: String,
+    started: i64,
+}
+
+/// Дочерние агенты сессий Codex `parents` (номер сессии → с какого момента смотреть) по
+/// журналам в каталоге `sessions`. Первая строка журнала агента ссылается на родительскую
+/// сессию: `source.subagent.thread_spawn.parent_thread_id`. Служебные потоки Codex
+/// (проверки Guardian) агентами сессии не считаются. Агент работает, пока в его журнале
+/// идёт ход и журнал менялся не дольше `stale` секунд назад.
+pub(crate) fn codex_children(
+    sessions: &Path,
+    parents: &HashMap<String, i64>,
+    now: i64,
+    stale: i64,
+) -> HashMap<String, Vec<SubAgent>> {
+    let mut out: HashMap<String, Vec<SubAgent>> = HashMap::new();
+    let Some(since) = parents.values().min().copied() else {
+        return out;
+    };
+    for rollout in rollouts(sessions, since) {
+        let Some(child) = codex_child(&rollout) else {
+            continue;
+        };
+        if !parents.contains_key(&child.parent) {
+            continue;
+        }
+        let updated = modified(&rollout).unwrap_or(0);
+        let running = codex_state(&rollout) == State::Busy && now - updated <= stale;
+        out.entry(child.parent).or_default().push(SubAgent {
+            id: child.id,
+            kind: child.name,
+            what: child.task,
+            background: false,
+            running,
+            started: if child.started > 0 {
+                child.started
+            } else {
+                updated
+            },
+            updated,
+        });
+    }
+    out
+}
+
+/// Дочерний агент Codex по первой строке журнала; `None` — журнал не дочернего агента.
+fn codex_child(rollout: &Path) -> Option<Child> {
+    static CACHE: LazyLock<Mutex<HashMap<PathBuf, Option<Child>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    if let Some(known) = CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(rollout).cloned())
+    {
+        return known;
+    }
+    let mut line = String::new();
+    BufReader::new(File::open(rollout).ok()?)
+        .read_line(&mut line)
+        .ok()?;
+    // Первая строка ещё не дописана: посмотрим в следующий раз.
+    let first = serde_json::from_str::<Value>(&line).ok()?;
+    let child = (|| {
+        if first.get("type")? != "session_meta" {
+            return None;
+        }
+        let payload = first.get("payload")?;
+        let spawn = payload
+            .get("source")?
+            .get("subagent")?
+            .get("thread_spawn")?;
+        let text = |value: &Value, key: &str| {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        // Путь агента в дереве: `/root` — сама сессия, `/root/errors` — агент «errors».
+        let path = text(spawn, "agent_path");
+        let task = path.strip_prefix("/root/").unwrap_or(&path).to_string();
+        let name = [text(spawn, "agent_nickname"), text(spawn, "agent_role")]
+            .into_iter()
+            .find(|name| !name.is_empty())
+            .unwrap_or_default();
+        let started = payload
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
+            .map_or(0, |time| time.timestamp());
+        Some(Child {
+            id: hook::sanitize(&text(payload, "id")),
+            parent: hook::sanitize(&text(spawn, "parent_thread_id")),
+            name,
+            task,
+            started,
+        })
+    })();
+    if let Ok(mut cache) = CACHE.lock() {
+        cache.insert(rollout.to_path_buf(), child.clone());
+    }
+    child
 }
 
 /// Идёт ли ход в сессии Codex: последнее из `task_started`, `task_complete`,
@@ -865,6 +977,7 @@ fn update(store: &Store, settings: &Settings, seen: &Seen, now: i64) -> Result<b
         process: None,
         // Транскрипт лежит внутри контейнера: передачу в фон там не отслеживаем.
         transcript: String::new(),
+        waiting_agents: 0,
     };
     let lock = store.lock();
     // Перемену мог уже записать другой процесс: значок и панель смотрят независимо.
