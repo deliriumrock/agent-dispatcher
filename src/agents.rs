@@ -10,7 +10,7 @@
 //! агентов: те, что работали в текущем ходе, и те, что ещё работают. Хук на конце хода
 //! Claude Code смотрит, не ждёт ли тот своих фоновых агентов (`waiting_for`): тогда ход
 //! не окончен. Когда агенты закончат, Claude Code сам продолжит ход; если же он молчит,
-//! ход завершает сверка (`finish`).
+//! а его транскрипт кончается концом ответа, ход завершает сверка (`finish`).
 
 use std::collections::HashMap;
 use std::fs;
@@ -34,6 +34,9 @@ const KEEP: usize = 20;
 const GRACE_SEC: i64 = 60;
 /// Сколько байт с конца транскрипта агента просматривать в поисках его последней записи.
 const LOG_TAIL: u64 = 64 * 1024;
+/// То же для транскрипта самой сессии: после конца ответа Claude Code дописывает в него
+/// служебные записи на десятки килобайт.
+const TRANSCRIPT_TAIL: u64 = 512 * 1024;
 
 /// Обновляет списки агентов у открытых сессий на этой машине.
 pub fn sweep(store: &Store) {
@@ -104,7 +107,14 @@ struct Found {
     marked: bool,
 }
 
-/// Ход ждал фоновых агентов, они закончили, а Claude Code уже `GRACE_SEC` молчит.
+/// Ход ждал фоновых агентов, они закончили, а Claude Code уже `GRACE_SEC` молчит и
+/// сам ход не продолжил.
+///
+/// Хуков, по которым видно, что Claude Code продолжил ход, может не быть долго: о начале
+/// своего инструмента он не сообщает, а о конце сообщит, только когда, например, тесты
+/// доработают. Поэтому молчание проверяется и по транскрипту сессии: он не менялся
+/// `GRACE_SEC`, и последняя запись разговора в нём — конец ответа, а не вызов
+/// инструмента или начатый ответ.
 fn held_too_long(session: &Session, found: &[Found], now: i64) -> bool {
     if session.awaiting.is_none() || session.status != Status::Working {
         return false;
@@ -112,12 +122,21 @@ fn held_too_long(session: &Session, found: &[Found], now: i64) -> bool {
     if found.iter().any(Found::holds) {
         return false;
     }
+    let Some(transcript) = session
+        .transcript
+        .as_deref()
+        .filter(|path| !path.is_empty())
+        .map(Path::new)
+    else {
+        return false;
+    };
     let quiet_since = found
         .iter()
         .filter(|found| found.agent.background)
         .map(|found| found.agent.updated)
+        .chain(modified(transcript))
         .fold(session.updated, i64::max);
-    now - quiet_since >= GRACE_SEC
+    now - quiet_since >= GRACE_SEC && answered(transcript, TRANSCRIPT_TAIL)
 }
 
 /// Завершает ход, который ждал фоновых агентов, как это сделал бы Stop от Claude Code:
@@ -253,7 +272,7 @@ fn claude_agent(dir: &Path, id: String, now: i64, stale: i64) -> Option<Found> {
         .get("finished")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let running = !finished && now - updated <= stale && !answered(&log);
+    let running = !finished && now - updated <= stale && !answered(&log, LOG_TAIL);
     let agent = SubAgent {
         kind: text("agentType").unwrap_or_default(),
         what: text("description")
@@ -271,10 +290,10 @@ fn claude_agent(dir: &Path, id: String, now: i64, stale: i64) -> Option<Found> {
     Some(Found { agent, marked })
 }
 
-/// Закончил ли агент ответ: последняя запись разговора в его транскрипте — ответ
-/// модели с `stop_reason: end_turn`, после которого ничего не пришло.
-fn answered(log: &Path) -> bool {
-    let (lines, _) = observe::tail_lines(log, LOG_TAIL);
+/// Закончен ли ответ: последняя запись разговора в последних `tail` байтах транскрипта
+/// `log` — ответ модели с `stop_reason: end_turn`, после которого ничего не пришло.
+fn answered(log: &Path, tail: u64) -> bool {
+    let (lines, _) = observe::tail_lines(log, tail);
     for line in lines.iter().rev() {
         let Ok(record) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -363,9 +382,13 @@ mod tests {
     const ANSWER: &str = r#"{"type":"assistant","message":{"stop_reason":"end_turn"}}"#;
     const TOOL: &str = r#"{"type":"assistant","message":{"stop_reason":"tool_use"}}"#;
 
-    /// Транскрипт сессии `s1` и её субагенты: `(id, meta.json, последняя запись журнала)`.
+    /// Транскрипт сессии `s1`, которая закончила ответ, и её субагенты: `(id, meta.json,
+    /// последняя запись журнала)`.
     fn claude_session(scratch: &Scratch, agents: &[(&str, &str, &str)]) -> PathBuf {
-        let transcript = scratch.write("proj/s1.jsonl", "{}\n");
+        let transcript = scratch.write(
+            "proj/s1.jsonl",
+            &format!("{{\"type\":\"user\"}}\n{ANSWER}\n"),
+        );
         for (id, meta, last) in agents {
             scratch.write(&format!("proj/s1/subagents/agent-{id}.meta.json"), meta);
             scratch.write(
@@ -528,6 +551,51 @@ mod tests {
         assert!(store::write_session(&file, &held_session(&transcript, just)).is_ok());
         sweep_at(&store, &settings, just, &scratch.0.join("codex"));
         assert_eq!(status(&file), Some(Status::Working));
+    }
+
+    /// Ставит файлу `path` время изменения `secs`, unix-секунды.
+    fn stamp(path: &Path, secs: i64) {
+        let time = UNIX_EPOCH + std::time::Duration::from_secs(secs.unsigned_abs());
+        let file = fs::File::options().write(true).open(path);
+        assert!(file.and_then(|file| file.set_modified(time)).is_ok());
+    }
+
+    #[test]
+    fn held_turn_is_not_ended_while_claude_works_on_it() {
+        let scratch = Scratch::new("resumed");
+        let (store, settings) = scratch.store();
+        let finished = r#"{"agentType":"general-purpose","requestShape":"background","toolUseId":"toolu_1","finished":true}"#;
+        let transcript = claude_session(&scratch, &[("a1", finished, ANSWER)]);
+        let base = modified(&transcript).unwrap_or(0);
+        let file = store.session_file("claude", "s1");
+        let status =
+            |file: &Path| store::read_session(file).map(|s| (s.status, s.awaiting.is_some()));
+
+        // Агент закончил, Claude Code продолжил ход и запустил долгую команду: хуков нет,
+        // пока она не доработает.
+        scratch.write(
+            "proj/s1.jsonl",
+            &format!("{{\"type\":\"user\"}}\n{ANSWER}\n{TOOL}\n"),
+        );
+        stamp(&transcript, base);
+        let now = base + 10 * GRACE_SEC;
+        assert!(store::write_session(&file, &held_session(&transcript, now)).is_ok());
+        sweep_at(&store, &settings, now, &scratch.0.join("codex"));
+        assert_eq!(status(&file), Some((Status::Working, true)));
+
+        // Пишет ответ: последняя запись — конец ответа, но транскрипт только что менялся.
+        scratch.write(
+            "proj/s1.jsonl",
+            &format!("{{\"type\":\"user\"}}\n{TOOL}\n{ANSWER}\n"),
+        );
+        stamp(&transcript, now - 5);
+        sweep_at(&store, &settings, now, &scratch.0.join("codex"));
+        assert_eq!(status(&file), Some((Status::Working, true)));
+
+        // Ответ закончен, Stop не пришёл, Claude Code молчит: ход завершает сверка.
+        let later = now - 5 + GRACE_SEC;
+        sweep_at(&store, &settings, later, &scratch.0.join("codex"));
+        assert_eq!(status(&file), Some((Status::Done, false)));
     }
 
     #[test]

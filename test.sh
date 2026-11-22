@@ -453,13 +453,21 @@ check "агент без отметки об окончании ход не де
 # Ход ждал агента, агент закончил, а Claude Code молчит: ход завершает сверка.
 prompt2 24000
 agent2 a3 '{"agentType":"Explore","description":"Find icons","requestShape":"background","toolUseId":"toolu_3"}' "$TOOLREC"
+printf '%s\n' "$ENDREC" >>"$TR/$CA2.jsonl"
 stop2 24300
 check "второй ход ждёт агента" "working" "$(field "claude-$CA2" .status)"
 agent2 a3 '{"agentType":"Explore","description":"Find icons","requestShape":"background","toolUseId":"toolu_3","finished":true}' "$ENDREC"
+# Claude Code продолжил ход сам и запустил долгую команду: хуков нет, пока она не доработает.
+printf '%s\n' "$TOOLREC" >>"$TR/$CA2.jsonl"
 before="$(wc -l <"$NOTES")"
 DISP_NOW=$(($(date +%s) + 120)) "$DISP" ls >/dev/null
 settle
-check "агент закончил, Claude Code молчит: ход окончен сверкой" "done" "$(field "claude-$CA2" .status)"
+check "Claude Code продолжил ход своей командой: ход не окончен" "working" "$(field "claude-$CA2" .status)"
+check "и уведомления нет" "$before" "$(wc -l <"$NOTES")"
+printf '%s\n' "$ENDREC" >>"$TR/$CA2.jsonl"
+DISP_NOW=$(($(date +%s) + 120)) "$DISP" ls >/dev/null
+settle
+check "ответ закончен, Claude Code молчит: ход окончен сверкой" "done" "$(field "claude-$CA2" .status)"
 check "и об этом пришло уведомление" "$((before + 1))" "$(wc -l <"$NOTES")"
 # Codex: журнал дочернего агента ссылается на родительскую сессию.
 CX="019a0000-0000-7000-8000-0000000c0de9"
