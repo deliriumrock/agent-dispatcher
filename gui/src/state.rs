@@ -33,6 +33,10 @@ const LANE_SLOTS: usize = 600;
 const PAGE: usize = 8;
 /// Ширина окна, с которой видны ленты времени.
 const LANE_FROM_WIDTH: f32 = 620.0;
+/// Высота строки сессии в списке, логические пиксели; совпадает с разметкой окна.
+const ROW_HEIGHT: f32 = 52.0;
+/// Высота строки агента под сессией, логические пиксели.
+const AGENT_LINE: f32 = 18.0;
 
 /// Что нужно сделать с самим окном после действия.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -435,10 +439,17 @@ impl State {
     /// Данные для окна шириной `width` логических пикселей.
     pub fn view(&self, width: f32) -> ViewData {
         let window = Window::ending_at(self.now, self.span, LANE_SLOTS);
+        // Строки идут одна под другой; у строки с агентами высота больше.
+        let mut top = 0.0;
         let rows: Vec<SessionRow> = self
             .rows
             .iter()
-            .map(|row| self.session_row(row, window))
+            .map(|row| {
+                let mut item = self.session_row(row, window);
+                item.top = top;
+                top += item.height;
+                item
+            })
             .collect();
         let counts = Counts::of(self.rows.iter().filter(|row| !row.session.accepted));
         let selected = self.selected_row();
@@ -520,6 +531,11 @@ impl State {
     fn session_row(&self, row: &Row, window: Window) -> SessionRow {
         let s = &row.session;
         let subtasks = row.subtasks();
+        let agents: Vec<SharedString> = row
+            .agent_lines(self.now)
+            .into_iter()
+            .map(SharedString::from)
+            .collect();
         // Важное рисуется последним и перекрывает остальное.
         let mut lane = self.history.lane(row, self.now);
         lane.sort_by_key(|segment| segment.phase);
@@ -553,6 +569,9 @@ impl State {
             },
             accepted: s.accepted,
             segments: model(segments),
+            height: ROW_HEIGHT + AGENT_LINE * agents.len() as f32,
+            agents: model(agents),
+            top: 0.0,
         }
     }
 }

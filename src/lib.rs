@@ -10,6 +10,7 @@
 //! Этот крейт — ядро диспетчера: хук, хранилище, доска и текстовая панель. Им пользуются
 //! программа `disp` и графическая оболочка `disp-gui`.
 
+pub mod agents;
 pub mod board;
 pub mod cli;
 pub mod config;
@@ -17,6 +18,7 @@ pub mod detect;
 pub mod error;
 #[cfg(test)]
 mod fakeproc;
+pub mod handover;
 pub mod hook;
 pub mod i18n;
 pub mod install;

@@ -123,8 +123,8 @@ impl Tray {
     /// работающие, затем простаивающие, в конце готовые. По нему же выбирается вид
     /// значка: готовые красят его, только когда больше ничего не идёт. Число на значке —
     /// сколько сессий в группе, которая его покрасила; молчащие считаются с работающими,
-    /// как и в меню.
-    pub fn from_rows(rows: &[Row]) -> Tray {
+    /// как и в меню. `now` — момент доски: по нему считается, сколько работают агенты.
+    pub fn from_rows(rows: &[Row], now: i64) -> Tray {
         let counts = Counts::of(rows);
         let idle = rows.iter().filter(|row| row.view == View::Idle).count();
         let working = counts.working + counts.quiet;
@@ -153,7 +153,7 @@ impl Tray {
         ];
         let sections = groups
             .into_iter()
-            .filter_map(|(title, views)| section(title, rows, views))
+            .filter_map(|(title, views)| section(title, rows, views, now))
             .collect();
         Tray {
             level,
@@ -173,20 +173,24 @@ impl Tray {
 }
 
 /// Группа из строк с видами `views`; `None`, если таких строк нет.
-fn section(title: &str, rows: &[Row], views: &[View]) -> Option<Section> {
+fn section(title: &str, rows: &[Row], views: &[View], now: i64) -> Option<Section> {
     let members: Vec<&Row> = rows.iter().filter(|row| views.contains(&row.view)).collect();
     if members.is_empty() {
         return None;
     }
     Some(Section {
         title: format!("{title}: {}", members.len()),
-        entries: members.iter().take(ENTRIES_MAX).map(|row| entry(row)).collect(),
+        entries: members
+            .iter()
+            .take(ENTRIES_MAX)
+            .map(|row| entry(row, now))
+            .collect(),
         more: members.len().saturating_sub(ENTRIES_MAX),
     })
 }
 
-/// Пункт меню одной сессии.
-fn entry(row: &Row) -> Entry {
+/// Пункт меню одной сессии: в подменю — статус, место и работающие агенты.
+fn entry(row: &Row, now: i64) -> Entry {
     let s = &row.session;
     let mark = row.view.label().chars().next().unwrap_or(' ');
     let mut text = format!("{mark} {} · {}", or_question(&s.label()), or_question(&s.agent));
@@ -204,7 +208,12 @@ fn entry(row: &Row) -> Entry {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join(" · ");
-    let info = vec![status, row.place().to_string()];
+    let mut info = vec![status, row.place().to_string()];
+    info.extend(
+        row.agent_lines(now)
+            .into_iter()
+            .map(|agent| format!("└ {agent}")),
+    );
 
     let key = row.key();
     let mut actions = Vec::new();
@@ -260,11 +269,46 @@ mod tests {
     #[test]
     fn empty_board_is_calm() {
         disp::i18n::set(disp::i18n::Lang::Ru);
-        let tray = Tray::from_rows(&[]);
+        let tray = Tray::from_rows(&[], NOW);
         assert_eq!(tray.level, Level::Calm);
         assert_eq!(tray.count, 0);
         assert_eq!(tray.summary, "Незакрытых сессий нет");
         assert!(tray.sections.is_empty());
+    }
+
+    #[test]
+    fn running_agents_are_listed_in_the_submenu() {
+        use disp::model::SubAgent;
+        let mut working = row("d4", Status::Working, "zellij:dev#4", "Генератор обоев");
+        working.session.agents = vec![
+            SubAgent {
+                id: "a1".to_string(),
+                kind: "general-purpose".to_string(),
+                what: "Survey wiki".to_string(),
+                background: true,
+                running: true,
+                started: NOW - 420,
+                updated: NOW - 5,
+            },
+            SubAgent {
+                id: "a2".to_string(),
+                kind: "Explore".to_string(),
+                running: false,
+                started: NOW - 900,
+                updated: NOW - 600,
+                ..SubAgent::default()
+            },
+        ];
+        let tray = Tray::from_rows(&[working], NOW);
+        let entry = &tray.sections[0].entries[0];
+        assert_eq!(
+            entry.info,
+            [
+                "● работает",
+                "zellij:dev#4",
+                "└ ● general-purpose: Survey wiki · 7м"
+            ]
+        );
     }
 
     #[test]
@@ -278,7 +322,7 @@ mod tests {
             row("b2", Status::Done, "zellij:dev#3", "Отчёт"),
             row("d4", Status::Working, "vscode", "Тесты"),
         ];
-        let tray = Tray::from_rows(&rows);
+        let tray = Tray::from_rows(&rows, NOW);
         assert_eq!(tray.level, Level::Attention);
         assert_eq!(tray.count, 2);
         let titles: Vec<&str> = tray.sections.iter().map(|s| s.title.as_str()).collect();
@@ -306,7 +350,7 @@ mod tests {
             row("c3", Status::Idle, "zellij:dev#5", "Черновик"),
             row("d4", Status::Working, "zellij:dev#2", ""),
         ];
-        let tray = Tray::from_rows(&rows);
+        let tray = Tray::from_rows(&rows, NOW);
         // Пока что-то работает, на значке — сколько работает, а не сколько готово.
         assert_eq!((tray.level, tray.count), (Level::Busy, 1));
         let titles: Vec<&str> = tray.sections.iter().map(|s| s.title.as_str()).collect();
@@ -321,9 +365,9 @@ mod tests {
         // Без названия — только задача и агент.
         assert_eq!(tray.sections[2].entries[0].text, "✓ site-31 · claude");
 
-        let done = Tray::from_rows(&rows[..3]);
+        let done = Tray::from_rows(&rows[..3], NOW);
         assert_eq!((done.level, done.count), (Level::Done, 2));
-        let idle = Tray::from_rows(&rows[2..3]);
+        let idle = Tray::from_rows(&rows[2..3], NOW);
         assert_eq!((idle.level, idle.count), (Level::Calm, 1));
         assert_ne!(idle.summary, "Незакрытых сессий нет");
     }
@@ -334,7 +378,7 @@ mod tests {
         quiet.session.updated = NOW - 3600;
         quiet.view = View::Quiet;
         let rows = [row("w1", Status::Working, "zellij:dev#2", ""), quiet];
-        let tray = Tray::from_rows(&rows);
+        let tray = Tray::from_rows(&rows, NOW);
         assert_eq!((tray.level, tray.count), (Level::Busy, 2));
         assert_eq!(tray.sections[0].title, "Работают: 2");
     }
@@ -344,7 +388,7 @@ mod tests {
         let rows: Vec<Row> = (0..13)
             .map(|n| row(&format!("s{n:02}"), Status::Done, "zellij:dev#1", "x"))
             .collect();
-        let tray = Tray::from_rows(&rows);
+        let tray = Tray::from_rows(&rows, NOW);
         assert_eq!(tray.sections[0].entries.len(), ENTRIES_MAX);
         assert_eq!(tray.sections[0].more, 3);
     }
@@ -368,7 +412,7 @@ mod tests {
     #[test]
     fn entries_are_found_by_key() {
         let rows = [row("a1", Status::Waiting, "zellij:dev#4", "x")];
-        let tray = Tray::from_rows(&rows);
+        let tray = Tray::from_rows(&rows, NOW);
         let key = rows[0].key();
         let path = tray.entry(&key).map(|entry| entry.path.as_path());
         assert_eq!(path, Some(Path::new("/s/claude-a1.json")));
