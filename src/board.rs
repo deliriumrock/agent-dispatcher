@@ -20,11 +20,11 @@ use crate::{t, tr};
 /// Сколько секунд простаивающая сессия остаётся в таблице.
 const IDLE_VISIBLE_SEC: i64 = 43_200;
 
-/// Уточняет молчащие строки по процессам агентов. `/proc` смотрится, только если
-/// такие строки есть.
+/// Уточняет по процессам агентов молчащие строки и те, что ждут фоновой работы.
+/// `/proc` смотрится, только если такие строки есть.
 fn settle_quiet(rows: &mut [Row], now: i64) {
     let quiet: Vec<usize> = (0..rows.len())
-        .filter(|index| rows[*index].view == View::Quiet)
+        .filter(|index| matches!(rows[*index].view, View::Quiet | View::Background))
         .collect();
     if quiet.is_empty() {
         return;
@@ -65,9 +65,30 @@ impl Row {
         }
     }
 
-    /// Уточняет вид молчащей сессии по её процессам (`procs::Activity`): идёт команда —
-    /// сессия работает, агента нет — прервана, агент жив без команд — завис.
+    /// Уточняет вид сессии по её процессам (`procs::Activity`).
+    ///
+    /// Молчащая: идёт команда — сессия работает, агента нет — прервана, агент жив без
+    /// команд — завис. Ждущая фоновой работы: идёт команда — это она, видно какая; агента
+    /// нет — прервана. Жив без команд — значит, ждёт не команду, а агентов или монитор.
     pub fn settle(&mut self, activity: &Activity, now: i64) {
+        if self.view == View::Background {
+            match activity {
+                Activity::Command { text, since } => {
+                    let took = age(now - since);
+                    self.note = Some(tr!(
+                        "command {took}: {text}",
+                        "команда {took}: {text}",
+                        "команда {took}: {text}"
+                    ));
+                }
+                Activity::Gone => {
+                    self.view = View::Lost;
+                    self.note = Some(tr!("agent closed", "агент закрыт", "агент закрито"));
+                }
+                Activity::Stuck | Activity::Unknown => {}
+            }
+            return;
+        }
         if self.view != View::Quiet {
             return;
         }
@@ -489,7 +510,7 @@ impl Counts {
         Counts {
             attention: count(&[View::Wait, View::Err, View::Lost, View::Stuck]),
             done: count(&[View::Done]),
-            working: count(&[View::Work]),
+            working: count(&[View::Work, View::Background]),
             quiet: count(&[View::Quiet]),
         }
     }
@@ -999,6 +1020,45 @@ mod tests {
         let mut working = row(Status::Working, false);
         working.settle(&Activity::Gone, now);
         assert_eq!(working.view, View::Work);
+    }
+
+    #[test]
+    fn row_waiting_for_background_work_shows_it() {
+        // Закончил ответ, ход ждёт фоновую команду.
+        let paused = || {
+            let mut row = row(Status::Working, false);
+            row.session.awaiting = Some(1000);
+            row.session.held = 1;
+            row.session.detail = "Full checks".to_string();
+            Row::new(row.path, row.session, 1000 + 40 * 60, 30)
+        };
+        let now = 1000 + 40 * 60;
+        assert_eq!(paused().view, View::Background);
+        assert_eq!(paused().view.label(), "◐ в фоне");
+        assert_eq!(paused().what(), "Full checks · Починить импорт цен");
+
+        let mut command = paused();
+        command.settle(
+            &Activity::Command {
+                text: "make test".to_string(),
+                since: now - 4 * 60,
+            },
+            now,
+        );
+        assert_eq!(command.view, View::Background);
+        assert!(command.what().starts_with("команда 4м: make test"));
+
+        let mut gone = paused();
+        gone.settle(&Activity::Gone, now);
+        assert_eq!(gone.view, View::Lost);
+
+        // Агент жив, а команд нет: ход ждёт агентов или монитор — так и остаётся.
+        let mut other = paused();
+        other.settle(&Activity::Stuck, now);
+        assert_eq!(other.view, View::Background);
+
+        let counts = Counts::of([&command, &other]);
+        assert_eq!(counts.working, 2, "в фоне — тоже работа");
     }
 
     #[test]

@@ -127,6 +127,7 @@ fn view_style(view: View) -> Style {
         View::Stuck => Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD),
         View::Quiet => Style::new().fg(Color::Magenta),
         View::Work => Style::new().fg(Color::Cyan),
+        View::Background => Style::new().fg(Color::Blue),
         View::Idle => dim(),
     }
 }

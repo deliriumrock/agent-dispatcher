@@ -8,9 +8,10 @@
 //!
 //! Сверка (`observe::sync`) раз в несколько секунд обновляет у открытых сессий список
 //! агентов: те, что работали в текущем ходе, и те, что ещё работают. Хук на конце хода
-//! Claude Code смотрит, не ждёт ли тот своих фоновых агентов (`waiting_for`): тогда ход
-//! не окончен. Когда агенты закончат, Claude Code сам продолжит ход; если же он молчит,
-//! а его транскрипт кончается концом ответа, ход завершает сверка (`finish`).
+//! Claude Code смотрит, не ждёт ли тот своих фоновых агентов (`waiting_for`) или других
+//! фоновых задач (`Session::held`): тогда ход не окончен. Когда они закончат, Claude Code
+//! сам продолжит ход; если же он молчит, а его транскрипт кончается концом ответа, ход
+//! завершает сверка (`finish`).
 
 use std::collections::HashMap;
 use std::fs;
@@ -80,7 +81,7 @@ fn sweep_at(store: &Store, settings: &Settings, now: i64, codex_home: &Path) {
                 .collect(),
             _ => continue,
         };
-        if held_too_long(&session, &found, now) {
+        if held_too_long(&session, &found, now, stale) {
             finish(store, settings, &file, &session, now, stale);
         }
         let agents = keep(
@@ -107,19 +108,27 @@ struct Found {
     marked: bool,
 }
 
-/// Ход ждал фоновых агентов, они закончили, а Claude Code уже `GRACE_SEC` молчит и
-/// сам ход не продолжил.
+/// Ход ждал фоновой работы, она кончилась, а Claude Code уже `GRACE_SEC` молчит и сам
+/// ход не продолжил.
+///
+/// Что кончились агенты, видно по их файлам. Другие фоновые задачи (`Session::held`) —
+/// команды, мониторы, воркфлоу — отметок не оставляют: пока Claude Code не продолжил ход,
+/// они считаются идущими. Ход, который ждёт их дольше порога молчания `stale`, ждёт того,
+/// что само не кончится, — например, запущенного в фоне сервера: он окончен.
 ///
 /// Хуков, по которым видно, что Claude Code продолжил ход, может не быть долго: о начале
 /// своего инструмента он не сообщает, а о конце сообщит, только когда, например, тесты
 /// доработают. Поэтому молчание проверяется и по транскрипту сессии: он не менялся
 /// `GRACE_SEC`, и последняя запись разговора в нём — конец ответа, а не вызов
 /// инструмента или начатый ответ.
-fn held_too_long(session: &Session, found: &[Found], now: i64) -> bool {
-    if session.awaiting.is_none() || session.status != Status::Working {
+fn held_too_long(session: &Session, found: &[Found], now: i64, stale: i64) -> bool {
+    let Some(awaiting) = session.awaiting else {
+        return false;
+    };
+    if session.status != Status::Working || found.iter().any(Found::holds) {
         return false;
     }
-    if found.iter().any(Found::holds) {
+    if session.held > 0 && now - awaiting < stale {
         return false;
     }
     let Some(transcript) = session
@@ -139,7 +148,7 @@ fn held_too_long(session: &Session, found: &[Found], now: i64) -> bool {
     now - quiet_since >= GRACE_SEC && answered(transcript, TRANSCRIPT_TAIL)
 }
 
-/// Завершает ход, который ждал фоновых агентов, как это сделал бы Stop от Claude Code:
+/// Завершает ход, который ждал фоновой работы, как это сделал бы Stop от Claude Code:
 /// статус «готово» и уведомление о конце хода. Возвращает, завершён ли ход.
 ///
 /// Пока сверка ждала блокировку, Claude Code мог продолжить ход. Начало своего
@@ -165,7 +174,7 @@ fn finish(
         .filter(|path| !path.is_empty())
         .map(|transcript| claude_found(Path::new(transcript), now, stale))
         .unwrap_or_default();
-    if old.updated != seen.updated || !held_too_long(&old, &found, now) {
+    if old.updated != seen.updated || !held_too_long(&old, &found, now, stale) {
         return false;
     }
     let ctx = Context {
@@ -176,7 +185,12 @@ fn finish(
         notify_min_sec: settings.int("DISP_NOTIFY_MIN_SEC", 120),
         ..Context::default()
     };
-    let outcome = hook::step(Some(&old), &serde_json::Map::new(), Action::Stop, &ctx);
+    // Задачи, которых ход так и не дождался, ещё идут: уведомление скажет, сколько их.
+    let mut payload = serde_json::Map::new();
+    if old.held > 0 {
+        payload.insert("background_tasks".to_string(), old.held.into());
+    }
+    let outcome = hook::step(Some(&old), &payload, Action::Stop, &ctx);
     if store::write_session(file, &outcome.state).is_err() {
         return false;
     }
@@ -631,7 +645,7 @@ mod tests {
 
         // Сверка решила, что Claude Code молчит.
         let found = claude_found(&transcript, now, 1800);
-        assert!(held_too_long(&seen, &found, now));
+        assert!(held_too_long(&seen, &found, now, 1800));
         // Пока она ждала блокировку, он продолжил ход своей командой: хука нет.
         scratch.write(
             "proj/s1.jsonl",
@@ -649,6 +663,43 @@ mod tests {
         stamp(&transcript, now - GRACE_SEC);
         assert!(finish(&store, &settings, &file, &seen, now, 1800));
         assert_eq!(status(&file), Some(Status::Done));
+    }
+
+    #[test]
+    fn held_turn_waits_for_background_tasks_up_to_the_silence_threshold() {
+        let scratch = Scratch::new("tasks");
+        let (store, settings) = scratch.store();
+        let transcript = claude_session(&scratch, &[]);
+        let base = modified(&transcript).unwrap_or(0);
+        let file = store.session_file("claude", "s1");
+        // Ход ждёт фоновую команду: Claude Code молчит, транскрипт кончается концом ответа.
+        let mut session = held_session(&transcript, base);
+        session.awaiting = Some(base);
+        session.updated = base;
+        session.held = 1;
+        session.bg = 1;
+        assert!(store::write_session(&file, &session).is_ok());
+        let read = |file: &Path| store::read_session(file).unwrap_or_default();
+
+        sweep_at(
+            &store,
+            &settings,
+            base + 10 * GRACE_SEC,
+            &scratch.0.join("codex"),
+        );
+        assert_eq!(
+            read(&file).status,
+            Status::Working,
+            "команда может идти и дольше"
+        );
+
+        // Порог молчания прошёл, а Claude Code ход так и не продолжил: в фоне, видимо,
+        // сервер. Ход окончен, в уведомлении — сколько задач осталось в фоне.
+        let later = base + 30 * 60;
+        sweep_at(&store, &settings, later, &scratch.0.join("codex"));
+        let done = read(&file);
+        assert_eq!((done.status, done.done_at), (Status::Done, Some(later)));
+        assert_eq!((done.awaiting, done.held, done.bg), (None, 0, 1));
     }
 
     #[test]

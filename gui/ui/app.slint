@@ -69,6 +69,7 @@ export global Theme {
     out property <color> waiting: #f8c438;
     out property <color> failed: #f7768e;
     out property <color> working: #46bed7;
+    out property <color> background: #7aa2f7;
     out property <color> quiet: #a078be;
     out property <color> idle: #737aa2;
     out property <color> done: #60c46e;
@@ -89,6 +90,9 @@ export global Theme {
         }
         if (kind == 6) {
             return self.idle;
+        }
+        if (kind == 8) {
+            return self.background;
         }
         return self.done;
     }

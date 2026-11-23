@@ -476,6 +476,46 @@ mkdir -p "$CODEX_HOME/sessions/2026/11/22"
 printf '%s\n%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"child-1\",\"source\":{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\"$CX\",\"agent_path\":\"/root/errors\",\"agent_nickname\":\"Newton\"}}}}}" '{"type":"event_msg","payload":{"type":"task_started"}}' >"$CODEX_HOME/sessions/2026/11/22/rollout-x-child-1.jsonl"
 has "дочерний агент Codex виден под сессией" "└ ● Newton: errors" "$("$DISP" ls)"
 
+echo "== 17. Claude: ход ждёт фоновую команду"
+# Claude Code перечисляет на конце хода фоновые задачи: когда они кончатся, он сам продолжит
+# ход уведомлением о задаче. Пока ход ждёт, он не окончен.
+export DISP_NOW=26000
+CB3="abababab-8888-4888-8888-0000000b9f03"
+printf '%s\n' "{\"type\":\"user\",\"cwd\":\"$T/site-31\"}" "$ENDREC" >"$TR/$CB3.jsonl"
+ev3() { # ev3 <DISP_NOW> <событие> <поля JSON>: событие сессии CB3
+  DISP_NOW="$1" ev claude "{\"session_id\":\"$CB3\",\"cwd\":\"$T/site-31\",\"transcript_path\":\"$TR/$CB3.jsonl\",\"hook_event_name\":\"$2\",$3}" "${Z[@]}"
+}
+SHELLTASK='{"id":"b2v6","type":"shell","status":"running","description":"Full checks for build 0.1.094","command":"make test"}'
+ev3 26000 UserPromptSubmit '"prompt":"Прогони проверки и закоммить"'
+before="$(wc -l <"$NOTES")"
+ev3 26600 Stop "\"last_assistant_message\":\"Идёт прогон, после него закоммичу\",\"background_tasks\":[$SHELLTASK]"
+settle
+check "ход ждёт фоновую команду: не готово" "working" "$(field "claude-$CB3" .status)"
+row="$("$DISP" ls | grep 0b9f03)"
+has "строка — в фоне" "◐ в фоне" "$row"
+has "и видно, чего ждёт" "Full checks for build 0.1.094" "$row"
+check "о конце хода, который ждёт команду, не сообщаем" "$before" "$(wc -l <"$NOTES")"
+ev3 26660 Notification '"notification_type":"idle_prompt","message":"Claude is waiting for your input"'
+check "напоминание о простое ожидание не прерывает" "working" "$(field "claude-$CB3" .status)"
+ev3 26840 UserPromptSubmit '"prompt":"<task-notification> <task-id>b2v6</task-id> <status>completed</status> </task-notification>","origin":"system"'
+check "уведомление о задаче продолжает тот же ход" "26000" "$(field "claude-$CB3" .turn_started)"
+check "и не подменяет запрос человека" "Прогони проверки и закоммить" "$(field "claude-$CB3" .last_prompt)"
+ev3 26900 Stop '"last_assistant_message":"Закоммитил","background_tasks":[]'
+settle
+check "ход окончен" "done" "$(field "claude-$CB3" .status)"
+has "уведомление — за весь ход" "закончил ход (15м)" "$(tail -n 1 "$NOTES")"
+# Сервер в фоне не кончится: ход, ждущий дольше порога молчания, окончен сверкой.
+ev3 27000 UserPromptSubmit '"prompt":"Подними сервер"'
+ev3 27300 Stop '"background_tasks":[{"id":"b7","type":"shell","status":"running","command":"npm run dev"}]'
+settle
+check "сервер в фоне: ход пока ждёт" "working" "$(field "claude-$CB3" .status)"
+before="$(wc -l <"$NOTES")"
+DISP_NOW=$(($(date +%s) + 120)) "$DISP" ls >/dev/null
+settle
+check "порог молчания прошёл: ход окончен сверкой" "done" "$(field "claude-$CB3" .status)"
+has "уведомление говорит, что в фоне осталось" "в фоне: 1" "$(tail -n 1 "$NOTES")"
+check "уведомление одно" "$((before + 1))" "$(wc -l <"$NOTES")"
+
 echo
 echo "итого: ok=$pass fail=$fail"
 rm -rf "$T" "$VS"
