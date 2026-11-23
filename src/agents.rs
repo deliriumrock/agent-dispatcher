@@ -81,7 +81,7 @@ fn sweep_at(store: &Store, settings: &Settings, now: i64, codex_home: &Path) {
             _ => continue,
         };
         if held_too_long(&session, &found, now) {
-            finish(store, settings, &file, &session, now);
+            finish(store, settings, &file, &session, now, stale);
         }
         let agents = keep(
             found.into_iter().map(|found| found.agent).collect(),
@@ -140,15 +140,33 @@ fn held_too_long(session: &Session, found: &[Found], now: i64) -> bool {
 }
 
 /// Завершает ход, который ждал фоновых агентов, как это сделал бы Stop от Claude Code:
-/// статус «готово» и уведомление о конце хода. Под блокировкой проверяет, что ход всё
-/// ещё ждёт и сессию никто не трогал с тех пор, как её видела сверка.
-fn finish(store: &Store, settings: &Settings, file: &Path, seen: &Session, now: i64) {
+/// статус «готово» и уведомление о конце хода. Возвращает, завершён ли ход.
+///
+/// Пока сверка ждала блокировку, Claude Code мог продолжить ход. Начало своего
+/// инструмента он пишет только в транскрипт, хука нет, так что одной записи сессии мало:
+/// под блокировкой заново проверяется всё, на чём сверка основала решение (`held_too_long`
+/// по свежим файлам агентов и транскрипта), и что сессию никто не трогал с тех пор, как её
+/// видела сверка.
+fn finish(
+    store: &Store,
+    settings: &Settings,
+    file: &Path,
+    seen: &Session,
+    now: i64,
+    stale: i64,
+) -> bool {
     let lock = store.lock();
     let Some(old) = store::read_session(file) else {
-        return;
+        return false;
     };
-    if old.awaiting.is_none() || old.status != Status::Working || old.updated != seen.updated {
-        return;
+    let found = old
+        .transcript
+        .as_deref()
+        .filter(|path| !path.is_empty())
+        .map(|transcript| claude_found(Path::new(transcript), now, stale))
+        .unwrap_or_default();
+    if old.updated != seen.updated || !held_too_long(&old, &found, now) {
+        return false;
     }
     let ctx = Context {
         agent: old.agent.clone(),
@@ -160,7 +178,7 @@ fn finish(store: &Store, settings: &Settings, file: &Path, seen: &Session, now: 
     };
     let outcome = hook::step(Some(&old), &serde_json::Map::new(), Action::Stop, &ctx);
     if store::write_session(file, &outcome.state).is_err() {
-        return;
+        return false;
     }
     if let Some(event) = &outcome.event {
         let _ = store.append_event(event);
@@ -169,6 +187,7 @@ fn finish(store: &Store, settings: &Settings, file: &Path, seen: &Session, now: 
     if let Some(note) = &outcome.note {
         notify::send(note, settings);
     }
+    true
 }
 
 impl Found {
@@ -596,6 +615,40 @@ mod tests {
         let later = now - 5 + GRACE_SEC;
         sweep_at(&store, &settings, later, &scratch.0.join("codex"));
         assert_eq!(status(&file), Some((Status::Done, false)));
+    }
+
+    #[test]
+    fn held_turn_resumed_while_the_sweep_waited_is_kept() {
+        let scratch = Scratch::new("race");
+        let (store, settings) = scratch.store();
+        let finished = r#"{"agentType":"general-purpose","requestShape":"background","toolUseId":"toolu_1","finished":true}"#;
+        let transcript = claude_session(&scratch, &[("a1", finished, ANSWER)]);
+        let now = modified(&transcript).unwrap_or(0) + GRACE_SEC;
+        let file = store.session_file("claude", "s1");
+        let seen = held_session(&transcript, now);
+        assert!(store::write_session(&file, &seen).is_ok());
+        let status = |file: &Path| store::read_session(file).map(|s| s.status);
+
+        // Сверка решила, что Claude Code молчит.
+        let found = claude_found(&transcript, now, 1800);
+        assert!(held_too_long(&seen, &found, now));
+        // Пока она ждала блокировку, он продолжил ход своей командой: хука нет.
+        scratch.write(
+            "proj/s1.jsonl",
+            &format!("{{\"type\":\"user\"}}\n{ANSWER}\n{TOOL}\n"),
+        );
+        stamp(&transcript, now);
+        assert!(!finish(&store, &settings, &file, &seen, now, 1800));
+        assert_eq!(status(&file), Some(Status::Working));
+
+        // Команда доработала, ответ закончен, и Claude Code снова молчит.
+        scratch.write(
+            "proj/s1.jsonl",
+            &format!("{{\"type\":\"user\"}}\n{TOOL}\n{ANSWER}\n"),
+        );
+        stamp(&transcript, now - GRACE_SEC);
+        assert!(finish(&store, &settings, &file, &seen, now, 1800));
+        assert_eq!(status(&file), Some(Status::Done));
     }
 
     #[test]
