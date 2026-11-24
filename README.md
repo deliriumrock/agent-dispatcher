@@ -81,9 +81,16 @@ subagents (type and task description) and Codex child agents (name and task).
 The row shows the running ones with how long they have run. The details
 (`disp show`, Enter in the panel) list every agent of the current turn, with
 finished ones marked ✓, and the tray menu shows the running ones. The SUB column
-counts running agents (`a2`). If Claude Code ends its turn while its background
-agents still run, the session stays “working”: Claude Code resumes the turn
-itself when they finish, and the notification comes then.
+counts running agents (`a2`).
+
+If Claude Code finishes its answer while its background work still runs (agents,
+a command such as tests, a monitor or a workflow), the session shows as “◐ bg
+work” rather than “done”. Claude Code resumes the turn itself when that work
+ends, and the notification comes then, with the length of the whole turn. The
+WHAT column shows what the session waits for, and for a command, the command and
+how long it has run. A background command that never ends by itself (a server)
+holds the turn for at most the silence threshold; then the session is “done”,
+and the notification says how many tasks are still in the background.
 
 Settings are `DISP_*` variables in the environment or in `~/.config/disp/env`:
 Telegram (`DISP_TG_TOKEN`, `DISP_TG_CHAT`), the minimum turn length worth a

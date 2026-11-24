@@ -177,8 +177,13 @@ pub fn step(
     s.updated = ctx.now;
     s.ended = false;
 
-    // Ход, который ждал фоновых агентов, продолжился или кончился: ждать больше нечего.
-    // Инструменты и субагенты ожидание не прерывают: это работа тех же агентов.
+    // Ход, который ждал фоновой работы, продолжился или кончился: ждать больше нечего.
+    // Инструменты и субагенты ожидание не прерывают: это работа тех же агентов. Не прерывает
+    // его и напоминание о простое: пока идёт фоновая работа, Claude Code ждёт ввода, но
+    // ход продолжит сам.
+    let paused = s.awaiting.is_some();
+    let idle_notice =
+        action == Action::Notice && text_of(payload, &["notification_type"]) == "idle_prompt";
     if !matches!(
         action,
         Action::Tool
@@ -186,8 +191,10 @@ pub fn step(
             | Action::SubagentDown
             | Action::TaskNew
             | Action::TaskDone
-    ) {
+    ) && !idle_notice
+    {
         s.awaiting = None;
+        s.held = 0;
     }
     let label = task_label(&s.task, &s.branch);
     let who = match ctx.agent.as_str() {
@@ -205,15 +212,29 @@ pub fn step(
         Action::Start => {}
         Action::Prompt => {
             let prompt = oneline(&text_of(payload, &["prompt"]));
+            // Запрос не от человека: так Claude Code сам продолжает ход, когда кончилась его
+            // фоновая работа, — приходит уведомление о задаче.
+            let system = text_of(payload, &["origin"]) == "system"
+                || prompt.starts_with("<task-notification>");
             let session_title = text_of(payload, &["session_title"]);
             if !session_title.is_empty() {
                 s.title = clip(&oneline(&session_title), 80);
-            } else if s.title.is_empty() {
+            } else if s.title.is_empty() && !system {
                 s.title = clip(&prompt, 80);
             }
-            s.last_prompt = Some(clip(&prompt, 300));
+            if !system {
+                s.last_prompt = Some(clip(&prompt, 300));
+            }
+            // Запрос не от человека посреди хода — ждавшего фоновой работы, уже продолженного
+            // ею или начатого новым запросом человека — ход продолжает, а не начинает заново:
+            // время хода и уведомление о его конце считаются от запроса человека. Фоновых задач
+            // бывает несколько, и о каждой приходит своё уведомление. Без идущего хода и
+            // такой запрос начинает новый.
+            let active = matches!(before, Status::Working | Status::Waiting);
+            if !(system && active && s.turn_started.is_some()) {
+                s.turn_started = Some(ctx.now);
+            }
             s.status = Status::Working;
-            s.turn_started = Some(ctx.now);
             s.accepted = false;
             s.detail.clear();
             s.bg = 0;
@@ -257,7 +278,7 @@ pub fn step(
                 }
                 s.status = Status::Waiting;
                 s.accepted = false;
-            } else if kind == "idle_prompt" && before == Status::Working {
+            } else if kind == "idle_prompt" && before == Status::Working && !paused {
                 s.status = Status::Done;
                 s.done_at = Some(ctx.now);
                 s.detail.clear();
@@ -313,11 +334,16 @@ pub fn step(
             s.detail.clear();
             s.bg = background;
             s.subagents = 0;
-            if ctx.waiting_agents > 0 {
-                // Claude Code ждёт своих фоновых агентов и, когда они закончат, сам
-                // продолжит ход: он не окончен, и сообщать о конце рано.
+            let held = held_tasks(payload);
+            if ctx.waiting_agents > 0 || !held.is_empty() {
+                // Claude Code ждёт своей фоновой работы и, когда она кончится, сам продолжит
+                // ход: он не окончен, и сообщать о конце рано.
                 s.status = Status::Working;
                 s.awaiting = Some(ctx.now);
+                s.held = i64::try_from(held.len()).unwrap_or(i64::MAX);
+                if let Some(first) = held.first() {
+                    s.detail = clip(&oneline(first), 80);
+                }
             } else {
                 s.status = Status::Done;
                 s.done_at = Some(ctx.now);
@@ -422,6 +448,35 @@ fn pick<'a>(payload: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a Value>
     keys.iter()
         .filter_map(|key| payload.get(*key))
         .find(|value| !matches!(value, Value::Null | Value::Bool(false)))
+}
+
+/// Фоновые задачи из события конца хода, которые держат ход, — описание каждой.
+///
+/// Claude Code перечисляет в `background_tasks` всю идущую фоновую работу сессии: когда
+/// она кончится, он сам продолжит ход. Агентов среди неё (`type: subagent`) здесь нет:
+/// держат ли они ход, решают их файлы (`crate::agents::waiting_for`). Число вместо списка
+/// и задачи без типа (старый вид поля) ход не держат: что это за задачи, неизвестно.
+fn held_tasks(payload: &Map<String, Value>) -> Vec<String> {
+    let Some(Value::Array(tasks)) = payload.get("background_tasks") else {
+        return Vec::new();
+    };
+    tasks
+        .iter()
+        .filter_map(Value::as_object)
+        .filter(|task| {
+            task.get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind != "subagent")
+        })
+        .map(|task| {
+            let described = text_of(task, &["description"]);
+            if described.is_empty() {
+                text_of(task, &["command", "name", "type"])
+            } else {
+                described
+            }
+        })
+        .collect()
 }
 
 /// Текст первого заданного поля; пустая строка, если не задано ни одно.
@@ -693,6 +748,7 @@ fn append(path: &Path, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::View;
     use serde_json::json;
 
     fn ctx(now: i64) -> Context {
@@ -857,6 +913,167 @@ mod tests {
         assert_eq!(done.state.status, Status::Done);
         assert_eq!(done.state.awaiting, None);
         assert!(done.note.is_some_and(|note| note.text.contains("10м")));
+    }
+
+    #[test]
+    fn turn_waiting_for_a_background_command_is_paused() {
+        let started = apply(
+            None,
+            "UserPromptSubmit",
+            json!({"prompt": "Прогони проверки и закоммить"}),
+            &ctx(1000),
+        );
+        let tasks = json!([
+            {"id": "b2v6", "type": "shell", "status": "running", "description": "Full checks for build 0.1.094", "command": "make test"},
+            {"id": "a1", "type": "subagent", "status": "running", "description": "Survey wiki", "agent_type": "Explore"},
+        ]);
+        let held = apply(
+            Some(&started.state),
+            "Stop",
+            json!({"last_assistant_message": "Идёт прогон, после него закоммичу", "background_tasks": tasks}),
+            &ctx(1300),
+        );
+        assert_eq!(held.state.status, Status::Working);
+        assert_eq!(
+            (held.state.awaiting, held.state.held, held.state.bg),
+            (Some(1300), 1, 2)
+        );
+        assert_eq!(held.state.detail, "Full checks for build 0.1.094");
+        assert_eq!(held.state.view(1300 + 3600, 30), View::Background);
+        assert!(held.note.is_none(), "о конце хода сообщать рано");
+
+        // Claude Code минуту ждёт ввода и напоминает об этом: ход всё ещё ждёт команду.
+        let idle = apply(
+            Some(&held.state),
+            "Notification",
+            json!({"notification_type": "idle_prompt", "message": "Claude is waiting for your input"}),
+            &ctx(1360),
+        );
+        assert_eq!(
+            (idle.state.status, idle.state.awaiting),
+            (Status::Working, Some(1300))
+        );
+        assert!(idle.note.is_none());
+
+        // Команда доработала: Claude Code сам продолжает ход уведомлением о задаче.
+        let resumed = apply(
+            Some(&idle.state),
+            "UserPromptSubmit",
+            json!({"prompt": "<task-notification>\n<task-id>b2v6</task-id>\n<status>completed</status>\n</task-notification>", "origin": "system"}),
+            &ctx(1540),
+        );
+        assert_eq!(resumed.state.status, Status::Working);
+        assert_eq!((resumed.state.awaiting, resumed.state.held), (None, 0));
+        assert_eq!(resumed.state.turn_started, Some(1000), "ход продолжается");
+        assert_eq!(
+            resumed.state.last_prompt.as_deref(),
+            Some("Прогони проверки и закоммить")
+        );
+        assert_eq!(resumed.state.title, "Прогони проверки и закоммить");
+        // Доработала вторая задача, а Claude Code ещё не закончил ответ: ожидания уже нет,
+        // но ход тот же.
+        let second = apply(
+            Some(&resumed.state),
+            "UserPromptSubmit",
+            json!({"prompt": "<task-notification>\n<task-id>b3k9</task-id>\n</task-notification>", "origin": "system"}),
+            &ctx(1570),
+        );
+        assert_eq!(
+            second.state.turn_started,
+            Some(1000),
+            "и после второго уведомления"
+        );
+
+        let done = apply(
+            Some(&second.state),
+            "Stop",
+            json!({"last_assistant_message": "Закоммитил", "background_tasks": []}),
+            &ctx(1600),
+        );
+        assert_eq!(done.state.status, Status::Done);
+        assert!(done.note.is_some_and(|note| note.text.contains("(10м)")));
+    }
+
+    #[test]
+    fn a_new_request_while_paused_starts_a_new_turn() {
+        let started = apply(
+            None,
+            "UserPromptSubmit",
+            json!({"prompt": "подними сервер"}),
+            &ctx(1000),
+        );
+        let server =
+            json!([{"id": "b1", "type": "shell", "status": "running", "command": "npm run dev"}]);
+        let held = apply(
+            Some(&started.state),
+            "Stop",
+            json!({"background_tasks": server}),
+            &ctx(1100),
+        );
+        assert_eq!(
+            (held.state.held, held.state.detail.as_str()),
+            (1, "npm run dev")
+        );
+        let asked = apply(
+            Some(&held.state),
+            "UserPromptSubmit",
+            json!({"prompt": "теперь поправь заголовок", "origin": "user"}),
+            &ctx(1200),
+        );
+        assert_eq!((asked.state.awaiting, asked.state.held), (None, 0));
+        assert_eq!(asked.state.turn_started, Some(1200));
+        assert_eq!(
+            asked.state.last_prompt.as_deref(),
+            Some("теперь поправь заголовок")
+        );
+        // Посреди нового хода пришёл результат старой фоновой задачи: ход тот же.
+        let late = apply(
+            Some(&asked.state),
+            "UserPromptSubmit",
+            json!({"prompt": "<task-notification>\n<task-id>b0</task-id>\n</task-notification>"}),
+            &ctx(1250),
+        );
+        assert_eq!(late.state.turn_started, Some(1200));
+        assert_eq!(
+            late.state.last_prompt.as_deref(),
+            Some("теперь поправь заголовок")
+        );
+        // Ход окончен, а потом пришло уведомление: это уже новый ход.
+        let finished = apply(Some(&late.state), "Stop", json!({}), &ctx(1260));
+        let woken = apply(
+            Some(&finished.state),
+            "UserPromptSubmit",
+            json!({"prompt": "<task-notification>\n<task-id>b0</task-id>\n</task-notification>"}),
+            &ctx(1290),
+        );
+        assert_eq!(
+            (woken.state.status, woken.state.turn_started),
+            (Status::Working, Some(1290))
+        );
+
+        // Старый вид поля — число задач или задачи без типа — ход не держит, как и агент
+        // без файлов, по которым видно, что он держит ход.
+        for tasks in [
+            json!(1),
+            json!([{"id": "b1"}]),
+            json!([{"id": "a1", "type": "subagent"}]),
+        ] {
+            let counted = apply(
+                Some(&asked.state),
+                "Stop",
+                json!({"background_tasks": tasks}),
+                &ctx(1300),
+            );
+            assert_eq!((counted.state.status, counted.state.bg), (Status::Done, 1));
+        }
+        // Без ожидания напоминание о простое завершает работающий ход, как и раньше.
+        let idle = apply(
+            Some(&asked.state),
+            "Notification",
+            json!({"notification_type": "idle_prompt"}),
+            &ctx(1300),
+        );
+        assert_eq!(idle.state.status, Status::Done);
     }
 
     #[test]
