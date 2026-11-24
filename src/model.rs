@@ -65,6 +65,9 @@ pub enum View {
     Stuck,
     /// Идёт ход.
     Work,
+    /// Агент закончил ответ, но ход не окончен: его фоновая работа (команда, агенты,
+    /// воркфлоу) ещё идёт, и когда она кончится, агент сам продолжит ход.
+    Background,
     /// Числится работающей и давно молчит, а проверить, что с агентом, нельзя.
     Quiet,
     /// Заданий не было.
@@ -84,6 +87,7 @@ impl View {
             View::Done => "done",
             View::Quiet => "quiet",
             View::Work => "work",
+            View::Background => "background",
             View::Idle => "idle",
         }
     }
@@ -98,6 +102,7 @@ impl View {
             View::Stuck => t!("? stuck", "? завис", "? завис"),
             View::Quiet => t!("? quiet", "? молчит", "? мовчить"),
             View::Work => t!("● working", "● работает", "● працює"),
+            View::Background => t!("◐ bg work", "◐ в фоне", "◐ у фоні"),
             View::Idle => t!("○ idle", "○ простой", "○ простій"),
         }
     }
@@ -111,6 +116,7 @@ impl View {
             View::Stuck => "1;35",
             View::Quiet => "35",
             View::Work => "36",
+            View::Background => "34",
             View::Idle => "2",
         }
     }
@@ -251,11 +257,16 @@ pub struct Session {
     /// сессия давно молчит.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<AgentProcess>,
-    /// Когда Claude Code закончил ход, ожидая своих фоновых агентов: ход ещё не окончен,
-    /// его продолжит сам Claude Code. Если агенты закончили, а он молчит, ход завершает
-    /// сверка (`crate::agents`).
+    /// Когда Claude Code закончил ответ, ожидая своей фоновой работы — агентов или задач
+    /// (`held`): ход ещё не окончен, его продолжит сам Claude Code. Если работа кончилась,
+    /// а он молчит, ход завершает сверка (`crate::agents`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaiting: Option<i64>,
+    /// Сколько фоновых задач, кроме агентов, — команд, мониторов, воркфлоу — держит ход,
+    /// который ждёт (`awaiting`). Отметок об окончании они не оставляют: что они кончились,
+    /// видно по тому, что Claude Code продолжил ход.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub held: i64,
     /// Агенты, которых сессия запустила в текущем ходе, и те, что ещё работают.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<SubAgent>,
@@ -298,6 +309,9 @@ impl Session {
             Status::Error => View::Err,
             Status::Done => View::Done,
             Status::Working if self.ended => View::Lost,
+            // Ход ждёт фоновой работы: молчание тут — не признак беды. Если она не
+            // кончается, ход завершает сверка (`crate::agents`).
+            Status::Working if self.awaiting.is_some() => View::Background,
             Status::Working if now - self.last_activity() > stale_min * 60 => View::Quiet,
             Status::Working => View::Work,
             Status::Idle => View::Idle,
@@ -332,6 +346,11 @@ where
     T: Default + Deserialize<'de>,
 {
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// Ноль не записывается в файл: поле со счётчиком появляется, только когда он не пуст.
+fn is_zero(value: &i64) -> bool {
+    *value == 0
 }
 
 #[cfg(test)]
@@ -374,6 +393,7 @@ mod tests {
             View::Lost,
             View::Stuck,
             View::Work,
+            View::Background,
             View::Quiet,
             View::Idle,
             View::Done,
@@ -396,6 +416,10 @@ mod tests {
         };
         assert_eq!(session.view(1000 + 29 * 60, 30), View::Work);
         assert_eq!(session.view(1000 + 31 * 60, 30), View::Quiet);
+        // Ход ждёт фоновой работы: в фоне, сколько бы ни молчал.
+        session.awaiting = Some(1000);
+        assert_eq!(session.view(1001, 30), View::Background);
+        assert_eq!(session.view(1000 + 31 * 60, 30), View::Background);
         session.ended = true;
         assert_eq!(session.view(1001, 30), View::Lost);
     }

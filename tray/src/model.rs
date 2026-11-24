@@ -147,7 +147,10 @@ impl Tray {
                 t!("Waiting for you", "Ждут тебя", "Чекають на тебе"),
                 &[View::Wait, View::Err, View::Lost, View::Stuck],
             ),
-            (t!("Working", "Работают", "Працюють"), &[View::Work, View::Quiet]),
+            (
+                t!("Working", "Работают", "Працюють"),
+                &[View::Work, View::Background, View::Quiet],
+            ),
             (t!("Idle", "Простой", "Простій"), &[View::Idle]),
             (t!("Done", "Готово", "Готово"), &[View::Done]),
         ];

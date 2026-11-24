@@ -600,6 +600,7 @@ fn kind(view: View) -> i32 {
         View::Quiet => 5,
         View::Idle => 6,
         View::Done => 7,
+        View::Background => 8,
     }
 }
 
