@@ -225,12 +225,16 @@ pub fn step(
             if !system {
                 s.last_prompt = Some(clip(&prompt, 300));
             }
-            s.status = Status::Working;
-            // Ход, ждавший фоновой работы, продолжается, а не начинается заново: время хода
-            // и уведомление о его конце считаются от запроса человека.
-            if !(system && paused) {
+            // Запрос не от человека посреди хода — ждавшего фоновой работы, уже продолженного
+            // ею или начатого новым запросом человека — ход продолжает, а не начинает заново:
+            // время хода и уведомление о его конце считаются от запроса человека. Фоновых задач
+            // бывает несколько, и о каждой приходит своё уведомление. Без идущего хода и
+            // такой запрос начинает новый.
+            let active = matches!(before, Status::Working | Status::Waiting);
+            if !(system && active && s.turn_started.is_some()) {
                 s.turn_started = Some(ctx.now);
             }
+            s.status = Status::Working;
             s.accepted = false;
             s.detail.clear();
             s.bg = 0;
@@ -966,9 +970,22 @@ mod tests {
             Some("Прогони проверки и закоммить")
         );
         assert_eq!(resumed.state.title, "Прогони проверки и закоммить");
+        // Доработала вторая задача, а Claude Code ещё не закончил ответ: ожидания уже нет,
+        // но ход тот же.
+        let second = apply(
+            Some(&resumed.state),
+            "UserPromptSubmit",
+            json!({"prompt": "<task-notification>\n<task-id>b3k9</task-id>\n</task-notification>", "origin": "system"}),
+            &ctx(1570),
+        );
+        assert_eq!(
+            second.state.turn_started,
+            Some(1000),
+            "и после второго уведомления"
+        );
 
         let done = apply(
-            Some(&resumed.state),
+            Some(&second.state),
             "Stop",
             json!({"last_assistant_message": "Закоммитил", "background_tasks": []}),
             &ctx(1600),
@@ -1008,6 +1025,30 @@ mod tests {
         assert_eq!(
             asked.state.last_prompt.as_deref(),
             Some("теперь поправь заголовок")
+        );
+        // Посреди нового хода пришёл результат старой фоновой задачи: ход тот же.
+        let late = apply(
+            Some(&asked.state),
+            "UserPromptSubmit",
+            json!({"prompt": "<task-notification>\n<task-id>b0</task-id>\n</task-notification>"}),
+            &ctx(1250),
+        );
+        assert_eq!(late.state.turn_started, Some(1200));
+        assert_eq!(
+            late.state.last_prompt.as_deref(),
+            Some("теперь поправь заголовок")
+        );
+        // Ход окончен, а потом пришло уведомление: это уже новый ход.
+        let finished = apply(Some(&late.state), "Stop", json!({}), &ctx(1260));
+        let woken = apply(
+            Some(&finished.state),
+            "UserPromptSubmit",
+            json!({"prompt": "<task-notification>\n<task-id>b0</task-id>\n</task-notification>"}),
+            &ctx(1290),
+        );
+        assert_eq!(
+            (woken.state.status, woken.state.turn_started),
+            (Status::Working, Some(1290))
         );
 
         // Старый вид поля — число задач или задачи без типа — ход не держит, как и агент

@@ -500,6 +500,9 @@ check "напоминание о простое ожидание не преры
 ev3 26840 UserPromptSubmit '"prompt":"<task-notification> <task-id>b2v6</task-id> <status>completed</status> </task-notification>","origin":"system"'
 check "уведомление о задаче продолжает тот же ход" "26000" "$(field "claude-$CB3" .turn_started)"
 check "и не подменяет запрос человека" "Прогони проверки и закоммить" "$(field "claude-$CB3" .last_prompt)"
+# Фоновых задач было две: о второй уведомление приходит, пока Claude Code ещё отвечает.
+ev3 26870 UserPromptSubmit '"prompt":"<task-notification> <task-id>b3k9</task-id> <status>completed</status> </task-notification>","origin":"system"'
+check "второе уведомление о задаче — тот же ход" "26000" "$(field "claude-$CB3" .turn_started)"
 ev3 26900 Stop '"last_assistant_message":"Закоммитил","background_tasks":[]'
 settle
 check "ход окончен" "done" "$(field "claude-$CB3" .status)"
