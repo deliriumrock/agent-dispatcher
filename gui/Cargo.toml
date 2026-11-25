@@ -3,6 +3,7 @@ name = "disp-gui"
 version.workspace = true
 edition = "2024"
 description = "Графическая оболочка диспетчера сессий AI-агентов"
+license-file.workspace = true
 publish = false
 
 [dependencies]

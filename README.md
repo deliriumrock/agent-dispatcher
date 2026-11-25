@@ -1,7 +1,5 @@
 # agent-dispatcher
 
-**English** · [Русский](README.ru.md)
-
 `disp` is a session dispatcher for AI coding agents: Claude Code, Codex CLI and
 Gemini CLI. One table covers every open session: which one is working, which one
 is waiting for you, and which one has finished and waits for you to review the
@@ -138,3 +136,11 @@ State lives in `~/.local/state/disp/`. For experiments point `DISP_STATE_DIR` an
 and set `DISP_TRAY=0`, or `disp watch` adds another icon to the tray.
 `DISP_CONTAINERS=0` keeps agents from the containers on this machine out of the
 test list.
+
+## License
+
+Apache License 2.0 with the Commons Clause condition; the full text is in
+`LICENSE`. You may use `disp`, change it and share it, at work too. You may not
+sell it, or a paid product or service — hosting and support included — whose
+value comes entirely or substantially from it. Because of that condition the
+project is source-available, not open source.
