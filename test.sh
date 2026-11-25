@@ -347,6 +347,12 @@ check "install: чужой хук и остальные ключи сохран�
 check "install: копия прежнего файла" "1" "$(jq '.hooks.Stop | length' "$CS.bak-disp")"
 has "install: повторный запуск сообщает, что менять нечего" "изменений нет" "$(DISP_CLAUDE_SETTINGS="$CS" "$DISP" install claude)"
 check "install: повторный запуск ничего не дублирует" "2" "$(jq '.hooks.Stop | length' "$CS")"
+# Обновление сменило путь к программе (Nix store, Homebrew Cellar): хук прежней установки
+# заменяется, а не остаётся вторым рядом с новым.
+jq '.hooks.Stop[1].hooks[0].command = "/nix/store/old-disp/bin/disp hook claude"' "$CS" >"$CS.old" && mv "$CS.old" "$CS"
+DISP_CLAUDE_SETTINGS="$CS" "$DISP" install claude >/dev/null
+check "install: хук прежней установки заменён новым" "2/0/1" \
+  "$(jq -r '[.hooks.Stop | length, ([.. | .command? // empty | select(startswith("/nix/store/old-disp"))] | length), ([.hooks.Stop[].hooks[].command | select(endswith(" hook claude"))] | length)] | join("/")' "$CS")"
 DISP_CODEX_HOOKS="$T/agent-conf/new/hooks.json" "$DISP" install codex >/dev/null
 check "install: если файла нет, он создаётся" "9" "$(jq '.hooks | length' "$T/agent-conf/new/hooks.json")"
 printf 'не json' >"$CS"
