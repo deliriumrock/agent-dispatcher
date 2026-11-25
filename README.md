@@ -1,5 +1,7 @@
 # agent-dispatcher
 
+**English** · [Українська](README.uk.md) · [Русский](README.ru.md)
+
 `disp` is a session dispatcher for AI coding agents: Claude Code, Codex CLI and
 Gemini CLI. One table covers every open session: which one is working, which one
 is waiting for you, and which one has finished and waits for you to review the
