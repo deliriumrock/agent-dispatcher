@@ -3,6 +3,7 @@ name = "disp-tray"
 version.workspace = true
 edition = "2024"
 description = "Значок диспетчера сессий AI-агентов в трее: Linux и macOS"
+license-file.workspace = true
 publish = false
 
 [dependencies]
