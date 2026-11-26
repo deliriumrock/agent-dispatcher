@@ -1033,7 +1033,7 @@ dependencies = [
 
 [[package]]
 name = "disp"
-version = "0.8.27"
+version = "0.8.30"
 dependencies = [
  "chrono",
  "ctrlc",
@@ -1049,7 +1049,7 @@ dependencies = [
 
 [[package]]
 name = "disp-gui"
-version = "0.8.27"
+version = "0.8.30"
 dependencies = [
  "chrono",
  "disp",
@@ -1059,7 +1059,7 @@ dependencies = [
 
 [[package]]
 name = "disp-tray"
-version = "0.8.27"
+version = "0.8.30"
 dependencies = [
  "disp",
  "rustix 1.1.6",

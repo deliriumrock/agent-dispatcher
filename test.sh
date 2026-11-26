@@ -347,6 +347,41 @@ check "install: чужой хук и остальные ключи сохран�
 check "install: копия прежнего файла" "1" "$(jq '.hooks.Stop | length' "$CS.bak-disp")"
 has "install: повторный запуск сообщает, что менять нечего" "изменений нет" "$(DISP_CLAUDE_SETTINGS="$CS" "$DISP" install claude)"
 check "install: повторный запуск ничего не дублирует" "2" "$(jq '.hooks.Stop | length' "$CS")"
+# An update moved the program (Nix store, Homebrew Cellar). The hook of the earlier install
+# gets the new path where it stands and keeps what the user set on it.
+jq '.hooks.Stop[1] = {matcher: "x", hooks: [{type: "command", command: "/nix/store/old-disp/bin/disp hook claude", timeout: 30}]}' "$CS" >"$CS.old" && mv "$CS.old" "$CS"
+has "install: о смене пути сообщает как об обновлении" "обновлены" "$(DISP_CLAUDE_SETTINGS="$CS" "$DISP" install claude)"
+check "install: хук прежней установки получил новый путь на своём месте" "2/0/x/30" \
+  "$(jq -r '[(.hooks.Stop | length), ([.. | .command? // empty | select(startswith("/nix/store/old-disp"))] | length), .hooks.Stop[1].matcher, .hooks.Stop[1].hooks[0].timeout] | join("/")' "$CS")"
+check "install: новый путь — путь этой программы" "$(readlink -f "$DISP") hook claude" "$(jq -r '.hooks.Stop[1].hooks[0].command' "$CS")"
+check "install: прежние копии настроек сохраняются" "1/2" "$(jq '.hooks.Stop | length' "$CS.1.bak-disp")/$(jq '.hooks.Stop | length' "$CS.bak-disp")"
+# A foreign command is not a disp hook because a disp path is among its arguments or
+# because it ends the same way.
+jq '.hooks.Stop += [{hooks: [{type: "command", command: "/usr/bin/printf %s /opt/tools/disp hook claude"}]}, {hooks: [{type: "command", command: "/usr/bin/logger done; /old/disp hook claude"}]}]' "$CS" >"$CS.old" && mv "$CS.old" "$CS"
+has "install: чужие команды, похожие на хук disp, — не повод менять файл" "изменений нет" "$(DISP_CLAUDE_SETTINGS="$CS" "$DISP" install claude)"
+check "install: чужие команды, похожие на хук disp, не тронуты" "4//usr/bin/printf %s /opt/tools/disp hook claude//usr/bin/logger done; /old/disp hook claude" \
+  "$(jq -r '"\(.hooks.Stop | length)/\(.hooks.Stop[2].hooks[0].command)/\(.hooks.Stop[3].hooks[0].command)"' "$CS")"
+# A settings file that is a symbolic link (stow, a dotfiles repository) stays a link: the
+# hooks go to the file behind it.
+mkdir -p "$T/dotfiles" "$T/agent-conf/linked"
+printf '{"model":"y"}\n' >"$T/dotfiles/settings.json"
+ln -s "$T/dotfiles/settings.json" "$T/agent-conf/linked/settings.json"
+DISP_CLAUDE_SETTINGS="$T/agent-conf/linked/settings.json" "$DISP" install claude >/dev/null
+check "install: ссылка на файл настроек остаётся ссылкой, хуки — в самом файле" "link/y/12" \
+  "$([ -L "$T/agent-conf/linked/settings.json" ] && echo link)/$(jq -r '"\(.model)/\(.hooks | length)"' "$T/dotfiles/settings.json")"
+# The file behind the link cannot be written, as when home-manager keeps it in the read-only
+# store: install says so and changes nothing. Root writes anywhere, so it skips the check.
+if [ "$(id -u)" != 0 ]; then
+  mkdir -p "$T/store" "$T/agent-conf/managed"
+  printf '{}\n' >"$T/store/settings.json"
+  chmod 555 "$T/store"
+  ln -s "$T/store/settings.json" "$T/agent-conf/managed/settings.json"
+  out="$(DISP_CLAUDE_SETTINGS="$T/agent-conf/managed/settings.json" "$DISP" install claude 2>&1)"
+  check "install: файл за ссылкой не записать — код 1, ничего не изменено" "1/{}/0" \
+    "$?/$(cat "$T/store/settings.json")/$(find "$T/agent-conf/managed" "$T/store" -name '*bak-disp*' -o -name '*.tmp.*' | wc -l)"
+  has "install: про ссылку сказано, куда она ведёт" "ссылка на $T/store/settings.json" "$out"
+  chmod 755 "$T/store"
+fi
 DISP_CODEX_HOOKS="$T/agent-conf/new/hooks.json" "$DISP" install codex >/dev/null
 check "install: если файла нет, он создаётся" "9" "$(jq '.hooks | length' "$T/agent-conf/new/hooks.json")"
 printf 'не json' >"$CS"
