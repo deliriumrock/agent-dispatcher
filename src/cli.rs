@@ -1072,7 +1072,8 @@ pub fn usage() -> String {
   disp unlabel       remove these labels from all panes
   disp repair        fix the task of records from older versions (the panel does it itself)
   disp install <claude|codex|gemini>  connect the hooks to the agent settings
-                     (adds only what is missing, keeps a .bak-disp copy)
+                     (adds what is missing, after an update repairs the path in its own
+                     hooks, keeps .bak-disp copies)
   disp config <claude|codex|gemini>   print the hook block for the agent
   disp doctor        check the environment and which agents send events
   disp hook <agent>  called by the agent hooks, not needed by hand
@@ -1108,7 +1109,8 @@ Language: DISP_LANG=en|ru|uk, otherwise the system language.
   disp unlabel       снять эти подписи со всех панелей
   disp repair        исправить задачу у записей прежних версий (панель делает это сама)
   disp install <claude|codex|gemini>  подключить хуки к настройкам агента
-                     (добавляет только недостающее, делает копию .bak-disp)
+                     (добавляет недостающее, после обновления чинит путь в своих хуках,
+                     хранит копии .bak-disp)
   disp config <claude|codex|gemini>   напечатать блок хуков для агента
   disp doctor        проверка окружения и того, какие агенты шлют события
   disp hook <agent>  вызывается хуками агента, вручную не нужен
@@ -1144,7 +1146,8 @@ Language: DISP_LANG=en|ru|uk, otherwise the system language.
   disp unlabel       зняти ці підписи з усіх панелей
   disp repair        виправити завдання в записах попередніх версій (панель робить це сама)
   disp install <claude|codex|gemini>  підключити хуки до налаштувань агента
-                     (додає лише відсутнє, робить копію .bak-disp)
+                     (додає відсутнє, після оновлення лагодить шлях у своїх хуках,
+                     зберігає копії .bak-disp)
   disp config <claude|codex|gemini>   надрукувати блок хуків для агента
   disp doctor        перевірка оточення й того, які агенти надсилають події
   disp hook <agent>  викликається хуками агента, вручну не потрібен

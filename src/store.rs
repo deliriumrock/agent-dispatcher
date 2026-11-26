@@ -5,7 +5,7 @@
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
-use std::io::Write;
+use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -189,8 +189,9 @@ pub fn write_session(path: &Path, session: &Session) -> Result<()> {
     write_atomic(path, line.as_bytes(), 0o600)
 }
 
-/// Записывает файл через временный и переименование.
-pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+/// Writes `bytes` to a temporary file next to `path` and returns its name. Renaming
+/// that file over `path` completes an atomic write; a caller that gives up removes it.
+pub fn stage(path: &Path, bytes: &[u8], mode: u32) -> io::Result<PathBuf> {
     let mut name = path.as_os_str().to_os_string();
     name.push(format!(".tmp.{}", std::process::id()));
     let tmp = PathBuf::from(name);
@@ -200,9 +201,20 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
         .truncate(true)
         .mode(mode)
         .open(&tmp)
-        .and_then(|mut file| file.write_all(bytes))
-        .and_then(|()| fs::rename(&tmp, path));
-    if let Err(err) = written {
+        .and_then(|mut file| file.write_all(bytes));
+    match written {
+        Ok(()) => Ok(tmp),
+        Err(err) => {
+            let _ = fs::remove_file(&tmp);
+            Err(err)
+        }
+    }
+}
+
+/// Writes a file through a temporary one and a rename.
+pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+    let tmp = stage(path, bytes, mode)?;
+    if let Err(err) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
         return Err(err.into());
     }
