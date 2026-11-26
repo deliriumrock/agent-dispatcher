@@ -451,46 +451,52 @@ fn merge(doc: &mut Value, block: &Value, agent: &str, me: &Me) -> Option<Change>
 
 /// Puts the disp hooks of one event in order and returns whether anything changed.
 ///
-/// A hook of an earlier install gets the path of this program in place: only the
-/// program word of its command changes, so the matcher, the timeout, other keys and
-/// the position the user gave it all stay. A second disp hook under the same matcher
-/// is a repeat left by an earlier run and goes; hooks under different matchers are
-/// separate on purpose and both stay.
+/// Hooks that repeat one another — the same matcher and the same command apart from
+/// the program path — are reduced to one. A run of earlier installs leaves such
+/// repeats. The one that stays is the first that already calls this program, so a
+/// stable name the user chose (a link kept by a package manager, `disp` from `PATH`)
+/// wins over a versioned path; when none does, the first one stays and gets the path of
+/// this program in place. Only the program word changes, so the matcher, the timeout,
+/// other keys and the position the user gave it all stay.
+///
+/// Disp hooks that differ in anything else — the matcher, a `NAME=value` prefix,
+/// redirections — are separate on purpose, and all of them stay.
 fn tidy(entries: &mut Vec<Value>, agent: &str, me: &Me) -> bool {
-    let mut scopes: Vec<Value> = Vec::new();
+    let found = disp_hooks(entries, agent, me);
+    let mut kept: Vec<&Found> = Vec::new();
+    for hook in &found {
+        match kept.iter_mut().find(|kept| kept.group == hook.group) {
+            None => kept.push(hook),
+            Some(kept) if kept.call.kind == Kind::Stale && hook.call.kind == Kind::Current => {
+                *kept = hook;
+            }
+            Some(_) => {}
+        }
+    }
+
     let mut changed = false;
+    let mut entry_index = 0;
     entries.retain_mut(|entry| {
-        let Some(fields) = entry.as_object_mut() else {
-            return true;
-        };
-        // Everything in the entry but the hooks themselves says when it applies.
-        let mut scope = fields.clone();
-        scope.remove("hooks");
-        let scope = Value::Object(scope);
-        let Some(list) = fields.get_mut("hooks").and_then(Value::as_array_mut) else {
+        let this_entry = entry_index;
+        entry_index += 1;
+        let Some(list) = entry.get_mut("hooks").and_then(Value::as_array_mut) else {
             return true;
         };
         let before = list.len();
+        let mut hook_index = 0;
         list.retain_mut(|hook| {
-            let Some(command) = hook.get("command").and_then(Value::as_str) else {
+            let at = (this_entry, hook_index);
+            hook_index += 1;
+            let Some(this) = found.iter().find(|found| found.at == at) else {
                 return true;
             };
-            let Some(found) = disp_call(command, agent, me) else {
-                return true;
-            };
-            if scopes.contains(&scope) {
+            if !kept.iter().any(|kept| kept.at == at) {
                 changed = true;
                 return false;
             }
-            scopes.push(scope.clone());
-            if found.kind == Kind::Stale {
-                let repaired = format!(
-                    "{}{}{}",
-                    &command[..found.program.start],
-                    me.quoted(),
-                    &command[found.program.end..]
-                );
-                hook["command"] = Value::String(repaired);
+            if this.call.kind == Kind::Stale {
+                let (before, after) = (&this.group.1, &this.group.2);
+                hook["command"] = Value::String(format!("{before}{}{after}", me.quoted()));
                 changed = true;
             }
             true
@@ -499,6 +505,52 @@ fn tidy(entries: &mut Vec<Value>, agent: &str, me: &Me) -> bool {
         !(before > 0 && list.is_empty())
     });
     changed
+}
+
+/// A disp hook found in the list of an event.
+struct Found {
+    /// The index of its entry, and its index in the entry's hooks.
+    at: (usize, usize),
+    /// What another hook must share to be a repeat of this one: everything in the entry
+    /// but its hooks (the matcher and the like), and the command before and after the
+    /// program word.
+    group: (Value, String, String),
+    /// What the command is.
+    call: Call,
+}
+
+/// Every disp hook of the agent among the entries of one event, in order.
+fn disp_hooks(entries: &[Value], agent: &str, me: &Me) -> Vec<Found> {
+    let mut found = Vec::new();
+    for (entry_index, entry) in entries.iter().enumerate() {
+        let Some(fields) = entry.as_object() else {
+            continue;
+        };
+        let Some(list) = fields.get("hooks").and_then(Value::as_array) else {
+            continue;
+        };
+        let mut scope = fields.clone();
+        scope.remove("hooks");
+        let scope = Value::Object(scope);
+        for (hook_index, hook) in list.iter().enumerate() {
+            let Some(command) = hook.get("command").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(call) = disp_call(command, agent, me) else {
+                continue;
+            };
+            found.push(Found {
+                at: (entry_index, hook_index),
+                group: (
+                    scope.clone(),
+                    command[..call.program.start].to_string(),
+                    command[call.program.end..].to_string(),
+                ),
+                call,
+            });
+        }
+    }
+    found
 }
 
 /// Whether any hook of the event calls disp for the agent.
@@ -828,9 +880,38 @@ mod tests {
             merged(&mut doc, "Stop", &me("/c/disp")),
             Some(Change::Updated)
         );
+        // The hook that already calls this program stays where it is.
         assert_eq!(
             doc["hooks"]["Stop"],
-            json!([entry("/c/disp hook claude"), entry("/usr/bin/true")])
+            json!([{"hooks": [hook("/usr/bin/true"), hook("/c/disp hook claude")]}])
+        );
+    }
+
+    #[test]
+    fn merge_keeps_disp_hooks_that_differ_in_more_than_the_path() {
+        // Two state directories, or a hook that keeps quiet: separate on purpose.
+        let hooks: Vec<Value> = [
+            "DISP_STATE_DIR=/team /old/disp hook claude",
+            "DISP_STATE_DIR=/me /old/disp hook claude",
+            "/old/disp hook claude 2>/dev/null",
+            "/new/disp hook claude",
+        ]
+        .iter()
+        .map(|command| hook(command))
+        .collect();
+        let mut doc = json!({"hooks": {"Stop": [{"hooks": hooks}]}});
+        assert_eq!(
+            merged(&mut doc, "Stop", &me("/new/disp")),
+            Some(Change::Updated)
+        );
+        assert_eq!(
+            doc["hooks"]["Stop"],
+            json!([{"hooks": [
+                hook("DISP_STATE_DIR=/team /new/disp hook claude"),
+                hook("DISP_STATE_DIR=/me /new/disp hook claude"),
+                hook("/new/disp hook claude 2>/dev/null"),
+                hook("/new/disp hook claude")
+            ]}])
         );
     }
 
@@ -1002,6 +1083,18 @@ mod tests {
         let mut doc = before.clone();
         assert_eq!(merged(&mut doc, "Stop", &me), Some(Change::None));
         assert_eq!(doc, before);
+
+        // A repeat with a versioned path, before or after the stable name: the stable
+        // name stays, whatever the order, and the repeat goes.
+        let stable = entry(&format!("{link} hook claude"));
+        for order in [
+            [entry(&copy), stable.clone()],
+            [stable.clone(), entry(&copy)],
+        ] {
+            let mut doc = json!({"hooks": {"Stop": order}});
+            assert_eq!(merged(&mut doc, "Stop", &me), Some(Change::Updated));
+            assert_eq!(doc["hooks"]["Stop"], json!([stable]));
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 
