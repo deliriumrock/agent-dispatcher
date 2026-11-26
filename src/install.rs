@@ -74,13 +74,19 @@ struct Me {
     path: Option<OsString>,
 }
 
-/// What a hook that calls disp points at.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What a hook that calls disp points at. The kinds are in order of preference: of
+/// hooks that repeat one another, the one of the greatest kind stays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
-    /// This very program, whichever way the command names it.
-    Current,
     /// A disp that is not this program: an earlier install or another copy.
     Stale,
+    /// This program by its own path, the one `disp install` writes. The path changes
+    /// with every update under Nix or Homebrew.
+    Current,
+    /// This program by a stable name that leads to it: a symbolic link kept by a
+    /// package manager, or the bare name found in `PATH`. The name stays the same
+    /// across updates, so a hook that uses it keeps working.
+    Alias,
 }
 
 impl Me {
@@ -111,17 +117,19 @@ impl Me {
     /// survives an update and is left as it is.
     fn kind(&self, program: &str) -> Option<Kind> {
         let path = Path::new(program);
+        if path == self.exe {
+            return Some(Kind::Current);
+        }
         let found = if program.contains('/') {
             path.is_absolute().then(|| path.to_path_buf())
         } else {
             self.lookup(program)
         };
-        let mine = path == self.exe
-            || found
-                .and_then(|found| fs::canonicalize(found).ok())
-                .is_some_and(|real| real == self.exe);
+        let mine = found
+            .and_then(|found| fs::canonicalize(found).ok())
+            .is_some_and(|real| real == self.exe);
         if mine {
-            return Some(Kind::Current);
+            return Some(Kind::Alias);
         }
         let name = path.file_name()?;
         (name == "disp" || Some(name) == self.exe.file_name()).then_some(Kind::Stale)
@@ -453,10 +461,11 @@ fn merge(doc: &mut Value, block: &Value, agent: &str, me: &Me) -> Option<Change>
 ///
 /// Hooks that repeat one another — the same matcher and the same command apart from
 /// the program path — are reduced to one. A run of earlier installs leaves such
-/// repeats. The one that stays is the first that already calls this program, so a
-/// stable name the user chose (a link kept by a package manager, `disp` from `PATH`)
-/// wins over a versioned path; when none does, the first one stays and gets the path of
-/// this program in place. Only the program word changes, so the matcher, the timeout,
+/// repeats. The one that stays is the first of the greatest [`Kind`]: a stable name the
+/// user chose (a link kept by a package manager, `disp` from `PATH`) wins over the
+/// versioned path of this program, and both win over an earlier install. When only
+/// earlier installs are there, the first one stays and gets the path of this program in
+/// place. Only the program word changes, so the matcher, the timeout,
 /// other keys and the position the user gave it all stay.
 ///
 /// Disp hooks that differ in anything else — the matcher, a `NAME=value` prefix,
@@ -467,9 +476,7 @@ fn tidy(entries: &mut Vec<Value>, agent: &str, me: &Me) -> bool {
     for hook in &found {
         match kept.iter_mut().find(|kept| kept.group == hook.group) {
             None => kept.push(hook),
-            Some(kept) if kept.call.kind == Kind::Stale && hook.call.kind == Kind::Current => {
-                *kept = hook;
-            }
+            Some(kept) if hook.call.kind > kept.call.kind => *kept = hook,
             Some(_) => {}
         }
     }
@@ -1071,7 +1078,7 @@ mod tests {
             "$HOME/bin/disp hook claude".to_string(),
             "\"${HOME}/bin/disp\" hook claude".to_string(),
         ] {
-            assert_eq!(kind(&stable, &me), Some(Kind::Current), "{stable}");
+            assert_eq!(kind(&stable, &me), Some(Kind::Alias), "{stable}");
         }
         let copy = format!("{} hook claude", other.join("disp").display());
         assert_eq!(kind(&copy, &me), Some(Kind::Stale));
@@ -1095,6 +1102,21 @@ mod tests {
             assert_eq!(merged(&mut doc, "Stop", &me), Some(Change::Updated));
             assert_eq!(doc["hooks"]["Stop"], json!([stable]));
         }
+
+        // A repeat with the versioned path of this very program, written by an earlier
+        // run: the stable name still stays, whatever the order.
+        let own = entry(&me.command("claude"));
+        assert_eq!(kind(&me.command("claude"), &me), Some(Kind::Current));
+        for order in [[own.clone(), stable.clone()], [stable.clone(), own.clone()]] {
+            let mut doc = json!({"hooks": {"Stop": order}});
+            assert_eq!(merged(&mut doc, "Stop", &me), Some(Change::Updated));
+            assert_eq!(doc["hooks"]["Stop"], json!([stable]));
+        }
+
+        // All three: the stable name stays, the other two go.
+        let mut doc = json!({"hooks": {"Stop": [own.clone(), entry(&copy), stable.clone()]}});
+        assert_eq!(merged(&mut doc, "Stop", &me), Some(Change::Updated));
+        assert_eq!(doc["hooks"]["Stop"], json!([stable]));
         let _ = fs::remove_dir_all(&dir);
     }
 
