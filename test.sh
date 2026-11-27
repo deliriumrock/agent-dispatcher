@@ -526,6 +526,14 @@ cx 22200 Stop '"last_assistant_message":"Проверил"'
 check "конец хода родителя ожидание не снимает" "waiting" "$(field "codex-$CX" .status)"
 cx 22210 PostToolUse '"tool_name":"exec_command","agent_id":"child-1","agent_type":"default"'
 check "агент получил ответ, ход родителя уже окончен: готово" "done" "$(field "codex-$CX" .status)"
+# The parent goes on after its Stop: once the child is answered, the parent is working.
+cx 22300 UserPromptSubmit '"prompt":"Проверь ещё раз"'
+cx 22310 PermissionRequest '"tool_name":"exec_command","agent_id":"child-1","agent_type":"default"'
+cx 22320 Stop '"last_assistant_message":"Проверил"'
+cx 22330 PostToolUse '"tool_name":"exec_command"'
+check "родитель продолжил после конца хода: сессия всё ещё ждёт" "waiting" "$(field "codex-$CX" .status)"
+cx 22340 PostToolUse '"tool_name":"exec_command","agent_id":"child-1","agent_type":"default"'
+check "агент получил ответ, родитель продолжает: работает" "working" "$(field "codex-$CX" .status)"
 
 echo "== 17. Claude: ход ждёт фоновую команду"
 # Claude Code перечисляет на конце хода фоновые задачи: когда они кончатся, он сам продолжит

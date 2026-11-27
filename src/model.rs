@@ -277,6 +277,12 @@ pub struct Session {
     /// turn: the session stays waiting until every thread that asked goes on.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub asks: IndexMap<String, String>,
+    /// The session ended its own turn while a request in `asks` was still open, and has
+    /// not gone on since: when the last request closes, the session is done rather than
+    /// working. Kept apart from `done_at`, since timestamps in whole seconds cannot tell
+    /// which of a start and an end in the same second came first.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub turn_over: bool,
     /// Контейнер, в котором идёт сессия (начало его идентификатора), если её ведёт
     /// наблюдатель (`crate::observe`), а не хуки.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -358,6 +364,11 @@ where
 /// Ноль не записывается в файл: поле со счётчиком появляется, только когда он не пуст.
 fn is_zero(value: &i64) -> bool {
     *value == 0
+}
+
+/// A flag is written to the file only while it is set.
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[cfg(test)]

@@ -204,6 +204,14 @@ pub fn step(
     if matches!(action, Action::Fail | Action::Interrupt | Action::End) {
         s.asks.clear();
     }
+    // The session itself goes on: a turn it ended while a child agent waited is no longer
+    // its last word. A request from the agent itself continues the turn, too.
+    if action == Action::Prompt
+        || (thread.is_empty() && matches!(action, Action::Tool | Action::Ask))
+        || s.asks.is_empty()
+    {
+        s.turn_over = false;
+    }
     let label = task_label(&s.task, &s.branch);
     let who = match ctx.agent.as_str() {
         "claude" => "Claude",
@@ -293,6 +301,11 @@ pub fn step(
             };
             if before != Status::Waiting {
                 note_text = Some(waiting_note(&label, who, &detail, place));
+            }
+            // A child agent that asks after the session ended its turn does not start a
+            // new one: the session is done again once the child goes on.
+            if !thread.is_empty() && matches!(before, Status::Done | Status::Error | Status::Idle) {
+                s.turn_over = true;
             }
             s.asks.insert(thread.clone(), detail.clone());
             s.status = Status::Waiting;
@@ -399,6 +412,7 @@ pub fn step(
                 // and the session is done once the child agent goes on.
                 s.status = Status::Waiting;
                 s.detail = asked.clone();
+                s.turn_over = !holding;
                 if !holding {
                     s.done_at = Some(ctx.now);
                 }
@@ -503,16 +517,15 @@ fn waiting_note(label: &str, who: &str, detail: &str, place: &str) -> String {
 
 /// The last open permission request of a child agent got its answer: the session goes
 /// on as it would have without the request. It is done if its own turn ended while the
-/// child agent waited, and working otherwise.
+/// child agent waited and it has not gone on since (`Session::turn_over`), and working
+/// otherwise.
 fn go_on(s: &mut Session) {
-    let turn_over = s
-        .done_at
-        .is_some_and(|end| s.turn_started.is_none_or(|start| end > start));
-    s.status = if turn_over {
+    s.status = if s.turn_over {
         Status::Done
     } else {
         Status::Working
     };
+    s.turn_over = false;
     s.detail.clear();
 }
 
@@ -1008,6 +1021,90 @@ mod tests {
             answered.event.map(|event| (event.from, event.to)),
             Some(("waiting".into(), "done".into()))
         );
+    }
+
+    /// A parent that asked nothing itself, a child agent with an open request, and the
+    /// parent's turn ended at `stop`.
+    fn ended_while_child_asks(start: i64, stop: i64) -> Session {
+        let started = apply(
+            None,
+            "UserPromptSubmit",
+            json!({"prompt": "x"}),
+            &codex(start),
+        );
+        let asked = apply(
+            Some(&started.state),
+            "PermissionRequest",
+            newton(),
+            &codex(start),
+        );
+        let ended = apply(Some(&asked.state), "Stop", json!({}), &codex(stop));
+        assert_eq!(ended.state.status, Status::Waiting);
+        assert!(ended.state.turn_over);
+        ended.state
+    }
+
+    #[test]
+    fn parent_that_goes_on_after_its_stop_is_working_when_the_child_is_answered() {
+        let child = json!({"tool_name": "exec_command", "agent_id": "child-1"});
+        // The parent runs its own tool after the Stop.
+        let ended = ended_while_child_asks(1000, 1300);
+        let own = json!({"tool_name": "exec_command"});
+        let resumed = apply(Some(&ended), "PostToolUse", own, &codex(1400));
+        assert_eq!(resumed.state.status, Status::Waiting);
+        assert!(!resumed.state.turn_over);
+        let answered = apply(
+            Some(&resumed.state),
+            "PostToolUse",
+            child.clone(),
+            &codex(1410),
+        );
+        assert_eq!(answered.state.status, Status::Working);
+
+        // The agent continues the turn itself with a task notification.
+        let system = json!({
+            "prompt": "<task-notification>done</task-notification>",
+            "origin": "system"
+        });
+        let resumed = apply(Some(&ended), "UserPromptSubmit", system, &codex(1400));
+        assert_eq!(resumed.state.status, Status::Waiting);
+        assert_eq!(resumed.state.turn_started, Some(1000));
+        let answered = apply(Some(&resumed.state), "PostToolUse", child, &codex(1410));
+        assert_eq!(answered.state.status, Status::Working);
+    }
+
+    #[test]
+    fn order_within_one_second_does_not_depend_on_timestamps() {
+        // The turn starts and ends in the same second: it is over.
+        let ended = ended_while_child_asks(1000, 1000);
+        let gone = json!({"agent_id": "child-1", "agent_type": "default"});
+        let stopped = apply(Some(&ended), "SubagentStop", gone, &codex(1010));
+        assert_eq!(stopped.state.status, Status::Done);
+        assert!(!stopped.state.turn_over);
+
+        // A turn ends, and the next one starts in the same second: it is not over.
+        let first = apply(
+            None,
+            "UserPromptSubmit",
+            json!({"prompt": "x"}),
+            &codex(900),
+        );
+        let done = apply(Some(&first.state), "Stop", json!({}), &codex(1000));
+        let next = apply(
+            Some(&done.state),
+            "UserPromptSubmit",
+            json!({"prompt": "y"}),
+            &codex(1000),
+        );
+        let asked = apply(
+            Some(&next.state),
+            "PermissionRequest",
+            newton(),
+            &codex(1000),
+        );
+        let child = json!({"tool_name": "exec_command", "agent_id": "child-1"});
+        let answered = apply(Some(&asked.state), "PostToolUse", child, &codex(1000));
+        assert_eq!(answered.state.status, Status::Working);
     }
 
     #[test]
