@@ -270,6 +270,13 @@ pub struct Session {
     /// Агенты, которых сессия запустила в текущем ходе, и те, что ещё работают.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<SubAgent>,
+    /// Permission requests nobody has answered yet, by the thread that asked: the
+    /// `agent_id` of a child agent, or an empty key for the session itself. The value is
+    /// the detail to show. A child agent of Codex, or a background agent of Claude Code,
+    /// asks in the session of its parent, while the parent keeps working or even ends its
+    /// turn: the session stays waiting until every thread that asked goes on.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub asks: IndexMap<String, String>,
     /// Контейнер, в котором идёт сессия (начало его идентификатора), если её ведёт
     /// наблюдатель (`crate::observe`), а не хуки.
     #[serde(default, skip_serializing_if = "Option::is_none")]

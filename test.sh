@@ -510,6 +510,22 @@ ev codex "{\"session_id\":\"$CX\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"U
 mkdir -p "$CODEX_HOME/sessions/2026/11/22"
 printf '%s\n%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"child-1\",\"source\":{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\"$CX\",\"agent_path\":\"/root/errors\",\"agent_nickname\":\"Newton\"}}}}}" '{"type":"event_msg","payload":{"type":"task_started"}}' >"$CODEX_HOME/sessions/2026/11/22/rollout-x-child-1.jsonl"
 has "дочерний агент Codex виден под сессией" "└ ● Newton: errors" "$("$DISP" ls)"
+# A child agent asks for permission in the session of its parent, with its own thread in
+# agent_id. The session waits until that thread goes on, whatever the parent does meanwhile.
+cx() { # cx <DISP_NOW> <event> <JSON fields>: an event of session CX
+  DISP_NOW="$1" ev codex "{\"session_id\":\"$CX\",\"cwd\":\"$T/site-31\",\"hook_event_name\":\"$2\",$3}" "${Z[@]}"
+}
+cx 22100 PermissionRequest '"tool_name":"exec_command","agent_id":"child-1","agent_type":"default"'
+settle
+check "дочерний агент Codex просит разрешения: сессия ждёт" "waiting" "$(field "codex-$CX" .status)"
+check "и видно, кто просит" "разрешение для Newton: exec_command" "$(field "codex-$CX" .detail)"
+has "уведомление называет агента" "разрешение для Newton" "$(tail -n 1 "$NOTES")"
+cx 22110 PostToolUse '"tool_name":"exec_command"'
+check "инструмент родителя ожидание не снимает" "waiting" "$(field "codex-$CX" .status)"
+cx 22200 Stop '"last_assistant_message":"Проверил"'
+check "конец хода родителя ожидание не снимает" "waiting" "$(field "codex-$CX" .status)"
+cx 22210 PostToolUse '"tool_name":"exec_command","agent_id":"child-1","agent_type":"default"'
+check "агент получил ответ, ход родителя уже окончен: готово" "done" "$(field "codex-$CX" .status)"
 
 echo "== 17. Claude: ход ждёт фоновую команду"
 # Claude Code перечисляет на конце хода фоновые задачи: когда они кончатся, он сам продолжит
